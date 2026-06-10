@@ -381,6 +381,69 @@ Apps.mesh = {
   teardown() { Mesh.stop(); },
 };
 
+/* ---------------- E2E · real WebCrypto sealing ----------------
+   Every outgoing message is sealed in this tab before it touches
+   the (simulated) wire: X25519 (or P-256) ECDH → HKDF-SHA-256 →
+   AES-256-GCM. Fresh identity keys per session, non-extractable.
+   Requires a secure context (https or localhost); without one,
+   messages are sent unsealed and the UI says so. */
+const b64 = (u8) => btoa(String.fromCharCode(...u8));
+const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+
+const E2E = {
+  ok: !!(globalThis.crypto && crypto.subtle),
+  alg: null, me: null, sessions: new Map(), _init: null,
+
+  init() {
+    if (!this.ok) return null;
+    if (!this._init) this._init = (async () => {
+      try {
+        this.me = await crypto.subtle.generateKey({ name: "X25519" }, false, ["deriveBits"]);
+        this.alg = "X25519";
+      } catch {
+        this.me = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+        this.alg = "P-256";
+      }
+    })();
+    return this._init;
+  },
+
+  async session(id) {
+    if (!this.ok) return null;
+    await this.init();
+    let s = this.sessions.get(id);
+    if (s) return s;
+    const gen = this.alg === "X25519" ? { name: "X25519" } : { name: "ECDH", namedCurve: "P-256" };
+    const drv = (pub) => (this.alg === "X25519" ? { name: "X25519", public: pub } : { name: "ECDH", public: pub });
+    const peer = await crypto.subtle.generateKey(gen, false, ["deriveBits"]); // the far end, simulated
+    const shared = await crypto.subtle.deriveBits(drv(peer.publicKey), this.me.privateKey, 256);
+    const hkdf = await crypto.subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
+    const myPub = new Uint8Array(await crypto.subtle.exportKey("raw", this.me.publicKey));
+    const key = await crypto.subtle.deriveKey(
+      { name: "HKDF", hash: "SHA-256", salt: new TextEncoder().encode("friday.e2e.v1·" + id), info: myPub },
+      hkdf, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", myPub));
+    const fp = [...digest.slice(0, 4)].map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase().match(/.{4}/g).join(" ");
+    s = { key, fp };
+    this.sessions.set(id, s);
+    return s;
+  },
+
+  async seal(id, text) {
+    const s = await this.session(id);
+    if (!s) return null;
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, s.key, new TextEncoder().encode(text)));
+    return { alg: this.alg + " · HKDF · AES-256-GCM", iv: b64(iv), ct: b64(ct), bytes: ct.length, fp: s.fp };
+  },
+
+  async open(id, wire) {
+    const s = await this.session(id);
+    const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(wire.iv) }, s.key, unb64(wire.ct));
+    return new TextDecoder().decode(pt);
+  },
+};
+
 /* ---------------- Messages ---------------- */
 const Chat = {
   active: "design",
@@ -462,7 +525,10 @@ Apps.messages = {
     const bubble = (m) => {
       const row = el("div", "msg" + (m.me ? " me" : ""));
       const when = m.queued ? "QUEUED · STORE &amp; FORWARD" : m.when;
-      row.innerHTML = `<div class="avatar">${m.ini}</div><div><div class="msg-meta"><span class="who">${esc(m.who)}</span><span class="when">${when}</span></div><div class="bubble">${esc(m.text)}</div></div>`;
+      const lock = m.wire ? `<button class="wire-toggle" title="View the sealed envelope">${Icons.lock}</button>` : "";
+      const wire = m.wire ? `<div class="wire-view mono">SEALED · ${m.wire.alg} · FP ${m.wire.fp}<br>IV ${m.wire.iv}<br>CT ${m.wire.ct.length > 64 ? m.wire.ct.slice(0, 64) + "…" : m.wire.ct} · ${m.wire.bytes} B ON THE WIRE</div>` : "";
+      row.innerHTML = `<div class="avatar">${m.ini}</div><div><div class="msg-meta"><span class="who">${esc(m.who)}</span><span class="when">${when}</span>${lock}</div><div class="bubble">${esc(m.text)}</div>${wire}</div>`;
+      row.querySelector(".wire-toggle")?.addEventListener("click", () => row.classList.toggle("show-wire"));
       return row;
     };
 
@@ -472,12 +538,21 @@ Apps.messages = {
         ? "BITCHAT · NOISE XX · BLE STORE-AND-FORWARD"
         : "END-TO-END · ONION ROUTE · 3 HOPS";
       head.innerHTML = `<div class="h-display">${esc(ch.label)}</div>
-        <div class="mono sec-ribbon"><span class="lock">${Icons.lock}</span> ${ribbon}</div>`;
+        <div class="mono sec-ribbon"><span class="lock">${Icons.lock}</span> ${ribbon}<span class="fp"></span></div>`;
+      const id = Chat.active;
+      if (E2E.ok) {
+        E2E.session(id).then((s) => {
+          const fp = head.querySelector(".fp");
+          if (s && fp && Chat.active === id) fp.textContent = ` · FP ${s.fp}`;
+        });
+      } else {
+        head.querySelector(".fp").textContent = " · UNSEALED — SERVE OVER HTTPS FOR E2E";
+      }
       msgs.replaceChildren(...ch.msgs.map(bubble));
       msgs.scrollTop = msgs.scrollHeight;
     };
 
-    composer.addEventListener("submit", (e) => {
+    composer.addEventListener("submit", async (e) => {
       e.preventDefault();
       const input = composer.querySelector("input");
       const text = input.value.trim();
@@ -487,6 +562,12 @@ Apps.messages = {
       const now = new Date();
       const when = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
       const mine = { who: "You", ini: "GR", when, me: true, text, queued: !!ch.nearby };
+      // seal for real: only ciphertext would leave this pane.
+      // what is displayed is the decrypted roundtrip of that envelope.
+      try {
+        mine.wire = await E2E.seal(Chat.active, text);
+        if (mine.wire) mine.text = await E2E.open(Chat.active, mine.wire);
+      } catch { mine.wire = null; }
       ch.msgs.push(mine);
       drawThread();
       // a peer answers across the mesh
@@ -495,12 +576,14 @@ Apps.messages = {
       const t = el("div", "msg");
       t.innerHTML = `<div class="avatar">··</div><div><div class="bubble typing"><i></i><i></i><i></i></div></div>`;
       setTimeout(() => { if (Chat.active === target && msgs.isConnected) { msgs.append(t); msgs.scrollTop = msgs.scrollHeight; } }, 600);
-      setTimeout(() => {
+      setTimeout(async () => {
         t.remove();
         const reply = Chat.replies[Math.floor(Math.random() * Chat.replies.length)];
         const src = Chat.channels[target];
         const peer = src.nearby ? [src.label, src.msgs[0].ini] : target === "avery" ? ["Avery Reyes", "AR"] : ["Dark Core", "DC"];
-        Chat.channels[target].msgs.push({ who: peer[0], ini: peer[1], when, text: reply });
+        const theirs = { who: peer[0], ini: peer[1], when, text: reply };
+        try { theirs.wire = await E2E.seal(target, reply); } catch { theirs.wire = null; }
+        Chat.channels[target].msgs.push(theirs);
         if (Chat.active === target && msgs.isConnected) drawThread();
         else { Chat.channels[target].unread++; drawRail(); Dock.refresh(); }
       }, 2100);

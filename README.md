@@ -67,6 +67,16 @@ window, with its own dock icon, and works offline.
 Also: ⌘K search, Control Center (top right), live menu bar, three
 wallpapers, and `#app` deep-links (e.g. `…/Friday/#ledger`).
 
+**Sending is really encrypted.** Outgoing messages are sealed in the
+browser with WebCrypto — X25519 (or P-256) ECDH → HKDF-SHA-256 →
+AES-256-GCM, fresh non-extractable keys per session — before they touch
+the simulated wire; what you see is the decrypted roundtrip of that
+envelope. Tap the lock on any sent bubble to read the actual ciphertext,
+and check the thread ribbon for the session fingerprint. (Peers are
+simulated locally, so the far end lives in the same tab — but the bytes
+on the wire are genuine AES-GCM ciphertext. Needs https or localhost;
+over plain http the ribbon says UNSEALED.)
+
 ## Anatomy
 
 ```

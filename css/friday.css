@@ -34,7 +34,7 @@
   --t-section: 360ms;
   --t-cinema: 600ms;
 
-  --font-display: "Cormorant Garamond", "Times New Roman", serif;
+  --font-display: "Bodoni Moda", "Didot", "Times New Roman", serif;
   --font-editorial: "EB Garamond", Georgia, serif;
   --font-sans: "Quicksand", -apple-system, "SF Pro Text", sans-serif;
   --font-mono: "Martian Mono", "SF Mono", ui-monospace, monospace;
@@ -347,6 +347,21 @@ html[data-theme="dark"][data-wallpaper="limestone"] #wallpaper {
   border-color: color-mix(in srgb, var(--accent) 22%, transparent);
 }
 .msg.me .msg-meta { justify-content: flex-end; }
+.wire-toggle {
+  width: 17px; height: 17px; display: inline-grid; place-items: center;
+  border-radius: 5px; color: var(--muted);
+  transition: color var(--t-hover) var(--ease);
+}
+.wire-toggle:hover { color: var(--accent); }
+.msg .wire-view {
+  display: none; margin-top: 5px; padding: 7px 10px;
+  border-radius: 9px; border: 1px dashed var(--pane-edge);
+  background: color-mix(in srgb, var(--body) 5%, transparent);
+  font-size: 7.5px; line-height: 1.9; color: var(--muted);
+  word-break: break-all; user-select: text;
+}
+.msg.show-wire .wire-view { display: block; }
+.msg.me .msg-meta .wire-toggle { order: -1; }
 .typing { display: inline-flex; gap: 4px; padding: 11px 13px; }
 .typing i {
   width: 5px; height: 5px; border-radius: 50%; background: var(--muted);
