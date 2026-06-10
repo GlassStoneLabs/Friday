@@ -51,6 +51,7 @@ const Icons = {
   calls: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 3.8h3l1.6 4-2 1.6a13.3 13.3 0 0 0 6 6l1.7-2 4 1.6v3c0 .9-.8 1.7-1.7 1.6C9.8 18.9 5.1 14.2 4 5.5c-.1-.9.6-1.7 1.5-1.7Z"/></svg>`,
   vault: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="3.5" y="3.5" width="17" height="17" rx="3"/><circle cx="12" cy="12" r="4.2"/><circle cx="12" cy="12" r="1.2" fill="currentColor" stroke="none"/><line x1="12" y1="7.8" x2="12" y2="9.4"/><line x1="12" y1="14.6" x2="12" y2="16.2"/><line x1="7.8" y1="12" x2="9.4" y2="12"/><line x1="14.6" y1="12" x2="16.2" y2="12"/></svg>`,
   settings: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 3.2v2.2M12 18.6v2.2M3.2 12h2.2M18.6 12h2.2M5.8 5.8l1.6 1.6M16.6 16.6l1.6 1.6M18.2 5.8l-1.6 1.6M7.4 16.6l-1.6 1.6"/></svg>`,
+  ledger: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.4h9.6L19 6.8V20a.8.8 0 0 1-.8.8H6a.8.8 0 0 1-.8-.8V4.2A.8.8 0 0 1 6 3.4Z"/><path d="M15 3.6V7h3.4"/><circle cx="9" cy="11.4" r="1.5"/><circle cx="9" cy="16.2" r="1.5"/><line x1="10.5" y1="11.4" x2="16" y2="11.4"/><line x1="10.5" y1="16.2" x2="16" y2="16.2"/><line x1="9" y1="12.9" x2="9" y2="14.7"/></svg>`,
   lock: `<svg viewBox="0 0 16 16" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="3.2" y="7" width="9.6" height="6.4" rx="1.8"/><path d="M5.4 7V5.2a2.6 2.6 0 0 1 5.2 0V7"/></svg>`,
   send: `<svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10 17 3l-3.2 14L9.6 11 3 10Z"/><line x1="9.6" y1="11" x2="17" y2="3"/></svg>`,
   phone: `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 3.8h3l1.6 4-2 1.6a13.3 13.3 0 0 0 6 6l1.7-2 4 1.6v3c0 .9-.8 1.7-1.7 1.6C9.8 18.9 5.1 14.2 4 5.5c-.1-.9.6-1.7 1.5-1.7Z"/></svg>`,
@@ -747,6 +748,175 @@ Apps.vault = {
   },
 };
 
+/* ---------------- Ledger · two sets of records ----------------
+   Per the Orange PIE spec: one editable set and one permanent set,
+   both verifiable, built on a tamper-evident (Merkle-chained) store.
+   The permanent set is an immudb-style hash chain — each entry seals
+   the hash of the one before it, so any silent edit breaks the proof. */
+const Ledger = {
+  // a tiny synchronous 64-bit-ish hex hash (FNV-1a x2) — enough to make
+  // the chain real: change any byte and every downstream hash changes.
+  hash(str) {
+    let h1 = 0x811c9dc5, h2 = 0xc2b2ae35;
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      h1 = Math.imul(h1 ^ c, 0x01000193);
+      h2 = Math.imul(h2 ^ c, 0x85ebca6b);
+    }
+    const hx = (n) => (n >>> 0).toString(16).padStart(8, "0");
+    return hx(h1) + hx(h2);
+  },
+  // editable working records — mutable, the day-to-day state
+  editable: [
+    { id: "REC-014", what: "Volume II — glass coverage spec", who: "AR", when: "09:05" },
+    { id: "REC-015", what: "Dark Sun voice bridge sign-off", who: "EL", when: "08:42" },
+    { id: "REC-016", what: "Vault shard policy → 10/20", who: "SS", when: "08:18" },
+  ],
+  // permanent records — built lazily into a sealed chain on first open
+  permanent: null,
+
+  seal() {
+    const events = [
+      { act: "GENESIS", what: "Eros Office ledger initialized", who: "GR", when: "Mon 07:00" },
+      { act: "ADMIT", what: "Node MW-04 joined mesh (PoW verified)", who: "DC", when: "Mon 07:14" },
+      { act: "COMMIT", what: "REC-009 Reticulum link layer 297-byte", who: "MW", when: "Mon 09:31" },
+      { act: "SHARD", what: "Coachwork plates sealed — 30 shards / 21 nodes", who: "SS", when: "Tue 14:05" },
+      { act: "COMMIT", what: "REC-012 CRDT sync across offices", who: "EL", when: "Wed 11:20" },
+      { act: "VOICE", what: "Dark Sun call sealed — 1200 bps · 3 hops", who: "GR", when: "Thu 16:48" },
+    ];
+    let prev = "0".repeat(16);
+    this.permanent = events.map((e, i) => {
+      const payload = `${i}|${e.act}|${e.what}|${e.who}|${e.when}|${prev}`;
+      const h = this.hash(payload);
+      const entry = { ...e, i, prev, h };
+      prev = h;
+      return entry;
+    });
+  },
+};
+
+Apps.ledger = {
+  name: "Ledger", title: "LEDGER · TWO SETS OF RECORDS", icon: Icons.ledger, w: 900, h: 580,
+  render(body) {
+    if (!Ledger.permanent) Ledger.seal();
+    let tab = "permanent"; // permanent | editable
+    let tampered = false;
+
+    const rail = el("aside", "rail");
+    rail.append(el("div", "mono rail-head", "RECORD SETS"));
+    const railList = el("div");
+    rail.append(railList, el("div", "mono rail-foot", "IMMUDB-STYLE MERKLE CHAIN<br>EDITABLE WORKS · PERMANENT PROVES"));
+
+    const content = el("section", "content");
+    const scroll = el("div", "content-scroll");
+    content.append(scroll);
+    body.append(rail, content);
+
+    const drawRail = () => {
+      railList.replaceChildren();
+      for (const [id, label, sub] of [["permanent", "Permanent", "sealed · tamper-evident"], ["editable", "Editable", "working state"]]) {
+        const b = el("button", "rail-item" + (id === tab ? " active" : ""));
+        b.innerHTML = `<span>${id === "permanent" ? Icons.lock : "✎"}</span><span><div class="file-name">${label}</div><div class="file-sub">${sub}</div></span>`;
+        b.addEventListener("click", () => { tab = id; draw(); });
+        railList.append(b);
+      }
+    };
+
+    const verifyChain = () => {
+      let prev = "0".repeat(16);
+      for (const e of Ledger.permanent) {
+        const expect = Ledger.hash(`${e.i}|${e.act}|${e.what}|${e.who}|${e.when}|${prev}`);
+        if (expect !== e.h || e.prev !== prev) return e.i; // first broken link
+        prev = e.h;
+      }
+      return -1;
+    };
+
+    const draw = () => {
+      drawRail();
+      scroll.replaceChildren();
+      if (tab === "permanent") {
+        const broken = verifyChain();
+        scroll.append(el("div", "", `
+          <div class="mono kicker">PERMANENT SET · MERKLE-CHAINED</div>
+          <div class="h-display" style="margin-bottom:4px">The record that <em>cannot be edited.</em></div>
+          <div class="set-sub">Each entry seals the hash of the one before it. Alter any field and every hash downstream stops matching — the proof breaks, visibly.</div>`));
+
+        const bar = el("div", "");
+        bar.style.cssText = "display:flex;gap:10px;align-items:center;margin:14px 0";
+        const status = el("span", "mono");
+        const setStatus = () => {
+          const b = verifyChain();
+          if (b === -1) { status.innerHTML = `<span style="color:#2E7D4F">✓ CHAIN VERIFIED · ${Ledger.permanent.length} SEALED ENTRIES</span>`; }
+          else { status.innerHTML = `<span style="color:var(--carmine)">✗ TAMPER DETECTED AT ENTRY ${b} · PROOF BROKEN</span>`; }
+        };
+        const vbtn = el("button", "rail-item", "Verify chain");
+        vbtn.style.cssText = "width:auto;background:color-mix(in srgb,var(--accent) 14%,transparent)";
+        vbtn.addEventListener("click", () => { draw(); });
+        const tbtn = el("button", "rail-item", tampered ? "Restore record" : "Simulate tampering");
+        tbtn.style.cssText = "width:auto;background:var(--pane-bg);border:1px solid var(--pane-edge)";
+        tbtn.addEventListener("click", () => {
+          if (!tampered) { Ledger.permanent[2].what = "REC-009 [SILENTLY ALTERED]"; tampered = true; }
+          else { Ledger.seal(); tampered = false; }
+          draw();
+        });
+        bar.append(vbtn, tbtn, status);
+        scroll.append(bar);
+        setStatus();
+
+        const broken2 = verifyChain();
+        Ledger.permanent.forEach((e) => {
+          const ok = broken2 === -1 || e.i < broken2;
+          const card = el("div", "pane");
+          card.style.cssText = "margin-bottom:8px;border-left:3px solid " + (ok ? "color-mix(in srgb,#2E7D4F 60%,transparent)" : "var(--carmine)");
+          card.innerHTML = `
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <span class="tag" style="background:color-mix(in srgb,var(--rule) 16%,transparent)">${e.act}</span>
+              <span class="file-name">${esc(e.what)}</span>
+              <span class="mono" style="margin-left:auto;color:var(--muted)">${e.who} · ${e.when}</span>
+            </div>
+            <div class="mono" style="color:var(--muted);font-size:8px;line-height:1.7">
+              PREV ${e.prev}<br>
+              <span style="color:${ok ? "var(--muted)" : "var(--carmine)"}">HASH ${e.h}${ok ? "" : "  ✗"}</span>
+            </div>`;
+          scroll.append(card);
+        });
+      } else {
+        scroll.append(el("div", "", `
+          <div class="mono kicker">EDITABLE SET · WORKING STATE</div>
+          <div class="h-display" style="margin-bottom:4px">The record you <em>work in.</em></div>
+          <div class="set-sub">Mutable day-to-day entries. Commit one and it is hashed, sealed, and appended to the permanent chain — where it can never be quietly changed again.</div>`));
+        const list = el("div");
+        list.style.marginTop = "12px";
+        Ledger.editable.forEach((r, idx) => {
+          const row = el("div", "pane");
+          row.style.cssText = "margin-bottom:8px;display:flex;align-items:center;gap:10px";
+          row.innerHTML = `<span class="mono" style="color:var(--muted)">${r.id}</span>
+            <span class="file-name" style="flex:1">${esc(r.what)}</span>
+            <span class="mono" style="color:var(--muted)">${r.who} · ${r.when}</span>`;
+          const commit = el("button", "rail-item", "Commit →");
+          commit.style.cssText = "width:auto;background:color-mix(in srgb,var(--accent) 14%,transparent)";
+          commit.addEventListener("click", () => {
+            const e = Ledger.editable.splice(idx, 1)[0];
+            const i = Ledger.permanent.length;
+            const prev = Ledger.permanent[i - 1].h;
+            const entry = { act: "COMMIT", what: `${e.id} ${e.what}`, who: e.who, when: "now", i, prev };
+            entry.h = Ledger.hash(`${i}|${entry.act}|${entry.what}|${entry.who}|${entry.when}|${prev}`);
+            Ledger.permanent.push(entry);
+            tab = "permanent";
+            draw();
+          });
+          row.append(commit);
+          list.append(row);
+        });
+        if (!Ledger.editable.length) list.append(el("div", "set-sub", "All working records committed and sealed."));
+        scroll.append(list);
+      }
+    };
+    draw();
+  },
+};
+
 /* ---------------- Settings ---------------- */
 function refreshOpenSettings() {
   const rec = WM.wins.get("settings");
@@ -858,7 +1028,7 @@ Apps.about = {
    DOCK
    ============================================================ */
 const Dock = {
-  order: ["mesh", "messages", "boards", "calls", "vault", null, "settings"],
+  order: ["mesh", "messages", "boards", "calls", "vault", "ledger", null, "settings"],
   el: null,
   build() {
     this.el = $("#dock");
@@ -1138,6 +1308,12 @@ Spotlight.build();
 ControlCenter.build();
 applyState();
 
-/* first morning on the river: open the mesh and the messages */
-setTimeout(() => WM.open("mesh"), 1250);
-setTimeout(() => { WM.open("messages"); Dock.refresh(); }, 1500);
+/* deep-link: friday/#ledger opens straight to a surface */
+const deeplink = location.hash.slice(1);
+if (deeplink && Apps[deeplink]) {
+  setTimeout(() => WM.open(deeplink), 1250);
+} else {
+  /* first morning on the river: open the mesh and the messages */
+  setTimeout(() => WM.open("mesh"), 1250);
+  setTimeout(() => { WM.open("messages"); Dock.refresh(); }, 1500);
+}
