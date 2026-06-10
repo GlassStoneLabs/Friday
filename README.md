@@ -51,9 +51,11 @@ window, with its own dock icon, and works offline.
 | **Boards** | monday-style work panes, drag cards between columns, CRDT-synced |
 | **Calls** | Project Dark Sun voice — GSM-FR at 1200 bps, Triple Diffie-Hellman |
 | **Vault** | Reed-Solomon shard map — lose nodes, reconstruct the file |
+| **Ledger** | Two sets of records — editable + permanent, Merkle-chained & verifiable |
 | **Settings** | Light/Dark/Auto, accent tinting, glass diffusion, profiles |
 
-Also: ⌘K search, Control Center (top right), live menu bar, three wallpapers.
+Also: ⌘K search, Control Center (top right), live menu bar, three
+wallpapers, and `#app` deep-links (e.g. `…/Friday/#ledger`).
 
 ## Anatomy
 
