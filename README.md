@@ -15,6 +15,12 @@ instead of bouncing.
 
 ## Install — pick whichever is easiest
 
+**0 · Just visit the site**
+The repo auto-deploys to GitHub Pages:
+**<https://glassstonelabs.github.io/Friday/>** — open it, then install it as
+an app (Chrome/Edge: install icon in the address bar · Safari: File ▸ Add to
+Dock…). Works offline after the first visit.
+
 **1 · Double-click (macOS)**
 Open `Install Friday.command`. It serves the app at `http://localhost:4173`
 and opens your browser. *(If macOS blocks it the first time: right-click ▸ Open.)*
