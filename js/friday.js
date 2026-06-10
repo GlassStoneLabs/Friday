@@ -57,6 +57,8 @@ const Icons = {
   phone: `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 3.8h3l1.6 4-2 1.6a13.3 13.3 0 0 0 6 6l1.7-2 4 1.6v3c0 .9-.8 1.7-1.7 1.6C9.8 18.9 5.1 14.2 4 5.5c-.1-.9.6-1.7 1.5-1.7Z"/></svg>`,
   phoneDown: `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13.5c5-4.6 13-4.6 18 0l-1.8 2.4-3.6-1.4-.4-2.6a11.5 11.5 0 0 0-6.4 0l-.4 2.6-3.6 1.4L3 13.5Z"/></svg>`,
   mic: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="9.4" y="3.4" width="5.2" height="10" rx="2.6"/><path d="M5.8 11.4a6.2 6.2 0 0 0 12.4 0M12 17.6v3"/></svg>`,
+  home: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 10.4 12 4l7.5 6.4V19a1 1 0 0 1-1 1h-4.6v-5.2H10V20H5.5a1 1 0 0 1-1-1Z"/></svg>`,
+  more: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="5.5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="18.5" cy="12" r="1.4" fill="currentColor" stroke="none"/></svg>`,
 };
 
 /* ============================================================
@@ -358,7 +360,7 @@ Apps.mesh = {
     tl.style.padding = "4px 13px";
     for (const [key, name] of Mesh.TYPES) {
       const row = el("div", "transport" + (State.transports[key] ? "" : " off"));
-      row.innerHTML = `<span class="t-dot"></span><span><div class="t-name">${name}</div><div class="t-sub">${key === "tor" ? "metadata-resistant" : key === "lora" ? "off-grid · 1.2 kbps" : "multipeer"}</div></span>`;
+      row.innerHTML = `<span class="t-dot"></span><span><div class="t-name">${name}</div><div class="t-sub">${key === "tor" ? "metadata-resistant" : key === "lora" ? "off-grid · 1.2 kbps" : key === "ble" ? "BitChat · Noise XX" : "multipeer"}</div></span>`;
       const sw = el("button", "switch" + (State.transports[key] ? " on" : ""));
       sw.classList.add("t-state");
       sw.setAttribute("role", "switch");
@@ -406,6 +408,16 @@ const Chat = {
         { who: "Avery Reyes", ini: "AR", when: "Mon", text: "Friday looks like the studio now. Ship it before the river thaws." },
       ],
     },
+    paitoon: {
+      label: "Paitoon S.", nearby: true, dm: true, unread: 1, sub: "BLE · 8 m", msgs: [
+        { who: "Paitoon S.", ini: "PS", when: "6:02 PM", text: "No bars down here in the workshop — this is riding the BitChat mesh, phone to phone." },
+      ],
+    },
+    heltec: {
+      label: "Heltec V4 relay", nearby: true, unread: 0, sub: "LoRa bridge · roof", msgs: [
+        { who: "Relay", ini: "HV", when: "5:48 PM", text: "Store-and-forward buffer: 3 sealed messages held for the night crew. Will deliver on contact." },
+      ],
+    },
   },
   replies: [
     "Copy. Sharding it across the grid now — 10 data, 20 parity.",
@@ -421,8 +433,11 @@ Apps.messages = {
     const rail = el("aside", "rail");
     rail.append(el("div", "mono rail-head", "CHANNELS · E2E"));
     const list = el("div");
-    rail.append(list);
-    rail.append(el("div", "mono rail-foot", "QUIET COMMUNITIES · TOR V3<br>NO METADATA LEAVES THE GLASS"));
+    const nearHead = el("div", "mono rail-head", "NEARBY · BITCHAT MESH");
+    nearHead.style.paddingTop = "12px";
+    const nearList = el("div");
+    rail.append(list, nearHead, nearList);
+    rail.append(el("div", "mono rail-foot", "QUIET COMMUNITIES · TOR V3<br>NEARBY VIA BITCHAT · NOISE XX<br>NO METADATA LEAVES THE GLASS"));
 
     const content = el("section", "content");
     const head = el("div", "thread-head");
@@ -434,24 +449,30 @@ Apps.messages = {
 
     const drawRail = () => {
       list.replaceChildren();
+      nearList.replaceChildren();
       for (const [id, ch] of Object.entries(Chat.channels)) {
         const b = el("button", "rail-item" + (id === Chat.active ? " active" : ""));
-        b.innerHTML = `<span style="opacity:.55">${ch.dm ? "@" : "#"}</span> ${esc(ch.label.replace(/^# /, ""))}` + (ch.unread ? `<span class="badge">${ch.unread}</span>` : "");
+        const glyph = ch.nearby ? "⌁" : ch.dm ? "@" : "#";
+        b.innerHTML = `<span style="opacity:.55">${glyph}</span> ${esc(ch.label.replace(/^# /, ""))}` + (ch.unread ? `<span class="badge">${ch.unread}</span>` : "");
         b.addEventListener("click", () => { Chat.active = id; ch.unread = 0; drawRail(); drawThread(); Dock.refresh(); });
-        list.append(b);
+        (ch.nearby ? nearList : list).append(b);
       }
     };
 
     const bubble = (m) => {
       const row = el("div", "msg" + (m.me ? " me" : ""));
-      row.innerHTML = `<div class="avatar">${m.ini}</div><div><div class="msg-meta"><span class="who">${esc(m.who)}</span><span class="when">${m.when}</span></div><div class="bubble">${esc(m.text)}</div></div>`;
+      const when = m.queued ? "QUEUED · STORE &amp; FORWARD" : m.when;
+      row.innerHTML = `<div class="avatar">${m.ini}</div><div><div class="msg-meta"><span class="who">${esc(m.who)}</span><span class="when">${when}</span></div><div class="bubble">${esc(m.text)}</div></div>`;
       return row;
     };
 
     const drawThread = () => {
       const ch = Chat.channels[Chat.active];
+      const ribbon = ch.nearby
+        ? "BITCHAT · NOISE XX · BLE STORE-AND-FORWARD"
+        : "END-TO-END · ONION ROUTE · 3 HOPS";
       head.innerHTML = `<div class="h-display">${esc(ch.label)}</div>
-        <div class="mono sec-ribbon"><span class="lock">${Icons.lock}</span> END-TO-END · ONION ROUTE · 3 HOPS</div>`;
+        <div class="mono sec-ribbon"><span class="lock">${Icons.lock}</span> ${ribbon}</div>`;
       msgs.replaceChildren(...ch.msgs.map(bubble));
       msgs.scrollTop = msgs.scrollHeight;
     };
@@ -465,17 +486,20 @@ Apps.messages = {
       const ch = Chat.channels[Chat.active];
       const now = new Date();
       const when = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-      ch.msgs.push({ who: "You", ini: "GR", when, me: true, text });
+      const mine = { who: "You", ini: "GR", when, me: true, text, queued: !!ch.nearby };
+      ch.msgs.push(mine);
       drawThread();
       // a peer answers across the mesh
       const target = Chat.active;
+      if (mine.queued) setTimeout(() => { mine.queued = false; if (Chat.active === target && msgs.isConnected) drawThread(); }, 1400);
       const t = el("div", "msg");
       t.innerHTML = `<div class="avatar">··</div><div><div class="bubble typing"><i></i><i></i><i></i></div></div>`;
       setTimeout(() => { if (Chat.active === target && msgs.isConnected) { msgs.append(t); msgs.scrollTop = msgs.scrollHeight; } }, 600);
       setTimeout(() => {
         t.remove();
         const reply = Chat.replies[Math.floor(Math.random() * Chat.replies.length)];
-        const peer = target === "avery" ? ["Avery Reyes", "AR"] : ["Dark Core", "DC"];
+        const src = Chat.channels[target];
+        const peer = src.nearby ? [src.label, src.msgs[0].ini] : target === "avery" ? ["Avery Reyes", "AR"] : ["Dark Core", "DC"];
         Chat.channels[target].msgs.push({ who: peer[0], ini: peer[1], when, text: reply });
         if (Chat.active === target && msgs.isConnected) drawThread();
         else { Chat.channels[target].unread++; drawRail(); Dock.refresh(); }
@@ -921,6 +945,7 @@ Apps.ledger = {
 function refreshOpenSettings() {
   const rec = WM.wins.get("settings");
   if (rec && !rec.minimized) rec.app._draw?.();
+  if (Mobile.active === "settings") Apps.settings._draw?.();
 }
 
 Apps.settings = {
@@ -1047,6 +1072,7 @@ const Dock = {
     }
   },
   refresh() {
+    if (!this.el) return;
     for (const b of this.el.querySelectorAll(".dock-app")) {
       const id = b.dataset.app;
       b.classList.toggle("running", WM.wins.has(id));
@@ -1218,9 +1244,9 @@ const Spotlight = {
     [...this.results.children].forEach((li, i) => li.classList.toggle("sel", i === this.sel));
   },
 
-  show() { this.veil.hidden = false; this.input.value = ""; this.filter(); this.input.focus(); },
-  hide() { this.veil.hidden = true; },
-  toggle() { this.veil.hidden ? this.show() : this.hide(); },
+  show() { if (!this.veil) return; this.veil.hidden = false; this.input.value = ""; this.filter(); this.input.focus(); },
+  hide() { if (this.veil) this.veil.hidden = true; },
+  toggle() { if (this.veil) this.veil.hidden ? this.show() : this.hide(); },
 };
 
 /* ============================================================
@@ -1283,9 +1309,111 @@ const ControlCenter = {
   },
 
   refresh() { if (this.el && !this.el.hidden) this.draw(); },
-  show() { MenuBar.hide(); this.draw(); this.el.hidden = false; },
-  hide() { this.el.hidden = true; },
-  toggle() { this.el.hidden ? this.show() : this.hide(); },
+  show() { if (!this.el) return; MenuBar.hide(); this.draw(); this.el.hidden = false; },
+  hide() { if (this.el) this.el.hidden = true; },
+  toggle() { if (this.el) this.el.hidden ? this.show() : this.hide(); },
+};
+
+/* ============================================================
+   THE POCKET PANE — HDL §11.1 · Friday on Android & iOS
+   Full-screen surfaces, a floating glass tab bar, 44pt targets.
+   ============================================================ */
+const Mobile = {
+  active: null, surface: null,
+  TABS: [
+    ["home", "Home", Icons.home],
+    ["mesh", "Mesh", Icons.mesh],
+    ["messages", "Chat", Icons.messages],
+    ["boards", "Boards", Icons.boards],
+    ["more", "More", Icons.more],
+  ],
+  MORE: ["calls", "vault", "ledger", "settings", "about"],
+
+  build() {
+    $("#mobile-root").hidden = false;
+    this.surface = $("#m-surface");
+    const tabs = $("#m-tabs");
+    for (const [id, label, icon] of this.TABS) {
+      const b = el("button", "", `${icon}<span>${label.toUpperCase()}</span>`);
+      b.dataset.tab = id;
+      b.addEventListener("click", () => (id === "more" ? this.sheet() : this.open(id)));
+      tabs.append(b);
+    }
+    $("#m-theme").addEventListener("click", () => {
+      State.theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+      applyState();
+    });
+    $("#m-sheet-veil").addEventListener("click", (e) => {
+      if (e.target.id === "m-sheet-veil") e.currentTarget.hidden = true;
+    });
+    const dl = location.hash.slice(1);
+    this.open(Apps[dl] ? dl : "home");
+  },
+
+  mark(id) {
+    for (const b of $("#m-tabs").children)
+      b.classList.toggle("on", b.dataset.tab === id || (b.dataset.tab === "more" && this.MORE.includes(id)));
+  },
+
+  open(id) {
+    if (this.active && Apps[this.active]) Apps[this.active].teardown?.();
+    $("#m-sheet-veil").hidden = true;
+    this.active = id;
+    this.mark(id);
+    this.surface.replaceChildren();
+    if (id === "home") {
+      $("#m-title").textContent = "TODAY · EROS OFFICE";
+      this.home();
+      return;
+    }
+    $("#m-title").textContent = Apps[id].title;
+    Apps[id].render(this.surface, {});
+  },
+
+  sheet() {
+    const sheet = $("#m-sheet");
+    sheet.replaceChildren();
+    for (const id of this.MORE) {
+      const b = el("button", "", `${Apps[id].icon}<span>${Apps[id].name}</span>`);
+      b.addEventListener("click", () => this.open(id));
+      sheet.append(b);
+    }
+    $("#m-sheet-veil").hidden = false;
+  },
+
+  home() {
+    const h = new Date().getHours();
+    const greet = h < 12 ? "morning" : h < 18 ? "afternoon" : "evening";
+    const unread = Object.values(Chat.channels).reduce((s, c) => s + c.unread, 0);
+    const wrap = el("section", "content");
+    const scroll = el("div", "content-scroll m-home");
+    scroll.innerHTML = `
+      <div class="h-display" style="margin-top:6px">Good ${greet}, <em>Gabriel.</em></div>
+      <div class="pane" data-go="mesh">
+        <div class="mono kicker">DARK CORE</div>
+        <div class="stat-n">${Mesh.activeCount()} nodes</div>
+        <div class="set-sub">Self-healing · Wi-Fi · BLE · LoRa · Tor</div>
+      </div>
+      <div class="pane" data-go="messages">
+        <div class="mono kicker">MESSAGES</div>
+        <div class="stat-n">${unread} unread</div>
+        <div class="set-sub">Onion routed · BitChat nearby mesh</div>
+      </div>
+      <div class="pane" data-go="boards">
+        <div class="mono kicker">ACTIVE PROJECT</div>
+        <div class="stat-n">Friday 1.0</div>
+        <div class="set-sub">${Board.cols[1].cards.length} panes in progress · ${Board.cols[2].cards.length} in review</div>
+      </div>
+      <div class="pane" data-go="ledger">
+        <div class="mono kicker">LEDGER</div>
+        <div class="stat-n">Chain intact</div>
+        <div class="set-sub">Two sets of records · permanent set sealed</div>
+      </div>`;
+    wrap.append(scroll);
+    this.surface.append(wrap);
+    scroll.querySelectorAll("[data-go]").forEach((p) =>
+      p.addEventListener("click", () => this.open(p.dataset.go)));
+  },
 };
 
 /* ============================================================
@@ -1301,19 +1429,27 @@ addEventListener("keydown", (e) => {
   if (e.key === "Escape") { Spotlight.hide(); ControlCenter.hide(); MenuBar.hide(); }
 });
 
-WM.area = $("#windows");
-Dock.build();
-MenuBar.build();
-Spotlight.build();
-ControlCenter.build();
+const pocket = matchMedia("(max-width: 760px)");
+pocket.addEventListener("change", () => location.reload());
+
 applyState();
 
-/* deep-link: friday/#ledger opens straight to a surface */
-const deeplink = location.hash.slice(1);
-if (deeplink && Apps[deeplink]) {
-  setTimeout(() => WM.open(deeplink), 1250);
+if (pocket.matches) {
+  Mobile.build();
 } else {
-  /* first morning on the river: open the mesh and the messages */
-  setTimeout(() => WM.open("mesh"), 1250);
-  setTimeout(() => { WM.open("messages"); Dock.refresh(); }, 1500);
+  WM.area = $("#windows");
+  Dock.build();
+  MenuBar.build();
+  Spotlight.build();
+  ControlCenter.build();
+
+  /* deep-link: friday/#ledger opens straight to a surface */
+  const deeplink = location.hash.slice(1);
+  if (deeplink && Apps[deeplink]) {
+    setTimeout(() => WM.open(deeplink), 1250);
+  } else {
+    /* first morning on the river: open the mesh and the messages */
+    setTimeout(() => WM.open("mesh"), 1250);
+    setTimeout(() => { WM.open("messages"); Dock.refresh(); }, 1500);
+  }
 }

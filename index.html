@@ -11,6 +11,8 @@
   <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="assets/icons/apple-touch-icon.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Friday">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -74,6 +76,24 @@
 
     <div id="control-center" class="glass" hidden></div>
     <div id="menu-layer"></div>
+
+    <div id="mobile-root" hidden>
+      <header id="m-top" class="glass-bar">
+        <svg viewBox="0 0 512 512" width="17" height="17" aria-hidden="true">
+          <g stroke="currentColor" stroke-width="34" stroke-linecap="round" fill="none">
+            <line x1="182" y1="131" x2="182" y2="389"/><line x1="182" y1="131" x2="358" y2="131"/><line x1="182" y1="259" x2="320" y2="259"/>
+          </g>
+          <g fill="currentColor">
+            <circle cx="182" cy="131" r="52"/><circle cx="358" cy="131" r="52"/><circle cx="182" cy="259" r="52"/><circle cx="320" cy="259" r="46"/><circle cx="182" cy="389" r="52"/>
+          </g>
+        </svg>
+        <span id="m-title" class="mono">TODAY · EROS OFFICE</span>
+        <button id="m-theme" aria-label="Toggle appearance">◐</button>
+      </header>
+      <main id="m-surface" class="win-body"></main>
+      <nav id="m-tabs" class="glass"></nav>
+      <div id="m-sheet-veil" hidden><div id="m-sheet" class="glass"></div></div>
+    </div>
   </div>
 
   <script src="js/friday.js"></script>

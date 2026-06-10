@@ -18,8 +18,18 @@ instead of bouncing.
 **0 · Just visit the site**
 The repo auto-deploys to GitHub Pages:
 **<https://glassstonelabs.github.io/Friday/>** — open it, then install it as
-an app (Chrome/Edge: install icon in the address bar · Safari: File ▸ Add to
-Dock…). Works offline after the first visit.
+an app. Works offline after the first visit. One codebase, four platforms:
+
+| Platform | How to install |
+| --- | --- |
+| **Web** | Just visit the URL — nothing to install |
+| **Mac** | Chrome/Edge: install icon in the address bar · Safari: **File ▸ Add to Dock…** |
+| **Android** | Chrome: **⋮ ▸ Add to Home screen ▸ Install** — installs as a real app |
+| **iOS / iPadOS** | Safari: **Share ▸ Add to Home Screen** — full-screen, offline-capable |
+
+On phones Friday switches to the **pocket pane** (HDL §11.1): full-screen
+surfaces with a floating glass tab bar — the desktop metaphor stays on
+desktops.
 
 **1 · Double-click (macOS)**
 Open `Install Friday.command`. It serves the app at `http://localhost:4173`
@@ -47,7 +57,7 @@ window, with its own dock icon, and works offline.
 | Surface | What it does |
 | --- | --- |
 | **Mesh** | Live Dark Core view — self-healing topology, transport layers, PoW trust |
-| **Messages** | Channels & DMs, end-to-end, onion-routed three hops |
+| **Messages** | Channels & DMs (onion-routed) + **Nearby** — BitChat-style BLE mesh, Noise-encrypted, store-and-forward |
 | **Boards** | monday-style work panes, drag cards between columns, CRDT-synced |
 | **Calls** | Project Dark Sun voice — GSM-FR at 1200 bps, Triple Diffie-Hellman |
 | **Vault** | Reed-Solomon shard map — lose nodes, reconstruct the file |
@@ -69,6 +79,17 @@ Friday/
 ├── manifest.webmanifest  PWA manifest
 └── sw.js                 offline cache
 ```
+
+## Protocol lineage
+
+The surfaces model the Orange PIE blueprint stack:
+[bitchat](https://github.com/permissionlesstech/bitchat) (BLE mesh,
+Noise protocol, store-and-forward) ·
+[Reticulum](https://github.com/markqvist/Reticulum) (cryptography-first
+routing) · [GhostWire](https://github.com/Phantomojo/GhostWire-secure-mesh-communication)
+(PoW admission, adaptive transports) · PairPhone/[Torfone](https://github.com/gegel/torfone)
+(GSM-FR voice over Tor) · [Tahoe-LAFS](https://github.com/tahoe-lafs/tahoe-lafs)
+(erasure-coded grids) · immudb-style Merkle ledgers.
 
 No frameworks, no build, no tracking. One material, a palette, a grid,
 a voice, a horizon — nothing else, in that order.

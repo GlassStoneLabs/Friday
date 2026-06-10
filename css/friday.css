@@ -561,6 +561,101 @@ input[type="range"]::-webkit-slider-thumb {
 ::selection { background: color-mix(in srgb, var(--accent) 26%, transparent); }
 :focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 1px; }
 
+/* ============================================================
+   THE POCKET PANE — HDL §11.1, for Android & iOS
+   In an app, Hudson Glass becomes the tab bar, the sheet, and
+   the header. Floating at the bottom edge, never edge-to-edge.
+   ============================================================ */
+#mobile-root { display: none; }
+
+@media (max-width: 760px) {
+  #menubar, #dock-wrap, #windows, #spotlight-veil, #control-center, #menu-layer { display: none !important; }
+
+  #mobile-root:not([hidden]) {
+    display: flex; flex-direction: column;
+    position: absolute; inset: 0;
+  }
+  #m-top {
+    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 10px;
+    padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
+  }
+  #m-title { flex: 1; color: var(--muted); }
+  #m-theme { font-size: 17px; width: 44px; height: 32px; border-radius: 9px; }
+  #m-theme:active { background: color-mix(in srgb, var(--body) 10%, transparent); }
+
+  #m-surface {
+    flex: 1; min-height: 0; display: flex;
+    margin-bottom: calc(76px + env(safe-area-inset-bottom));
+  }
+  /* app shells stack vertically; the side rail becomes a pill scroller */
+  #m-surface { flex-direction: column; }
+  #m-surface .rail {
+    width: 100%; flex: 0 0 auto;
+    flex-direction: row; align-items: center; gap: 6px;
+    padding: 9px 12px; overflow-x: auto; overflow-y: hidden;
+    border-right: 0; border-bottom: 1px solid var(--pane-edge);
+  }
+  #m-surface .rail::-webkit-scrollbar { display: none; }
+  #m-surface .rail-head, #m-surface .rail-foot { display: none !important; }
+  #m-surface .rail > div:not(.rail-head):not(.rail-foot) { display: flex; gap: 6px; }
+  #m-surface .rail-item {
+    width: auto; white-space: nowrap; flex: 0 0 auto;
+    min-height: 36px; padding: 7px 13px;
+    background: var(--pane-bg); border: 1px solid var(--pane-edge);
+  }
+  #m-surface .rail-item.active { background: color-mix(in srgb, var(--accent) 16%, transparent); border-color: transparent; }
+  #m-surface .mesh-stats { display: none; }
+  #m-surface .msg { max-width: 88%; }
+  #m-surface .thread-head { flex-wrap: wrap; gap: 4px 12px; padding: 12px 16px 10px; }
+  #m-surface .msg-list, #m-surface .composer { padding-left: 16px; padding-right: 16px; }
+  #m-surface .content-scroll { padding: 16px; }
+  #m-surface .col { flex: 0 0 240px; }
+  .window, .titlebar { min-width: 0; }
+
+  #m-tabs {
+    position: absolute; left: 12px; right: 12px;
+    bottom: calc(10px + env(safe-area-inset-bottom));
+    display: flex; gap: 2px; padding: 7px; border-radius: 26px;
+  }
+  #m-tabs button {
+    flex: 1; min-height: 48px; border-radius: 19px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+    color: var(--muted);
+    font-family: var(--font-mono); font-size: 7.5px; font-weight: 400; letter-spacing: 0.12em;
+    transition: color var(--t-hover) var(--ease), background var(--t-hover) var(--ease);
+  }
+  #m-tabs button svg { width: 19px; height: 19px; }
+  #m-tabs button.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); }
+
+  #m-sheet-veil {
+    position: absolute; inset: 0; z-index: 60;
+    background: color-mix(in srgb, var(--ground) 30%, transparent);
+    display: flex; align-items: flex-end;
+  }
+  #m-sheet {
+    width: 100%; margin: 0 10px;
+    margin-bottom: calc(86px + env(safe-area-inset-bottom));
+    border-radius: 22px; padding: 10px;
+    display: flex; flex-direction: column; gap: 4px;
+    animation: sheet-in var(--t-pane) var(--ease);
+  }
+  #m-sheet button {
+    display: flex; align-items: center; gap: 13px;
+    min-height: 50px; padding: 0 14px; border-radius: 14px;
+    font-size: 14.5px; font-weight: 600; text-align: left;
+  }
+  #m-sheet button:active { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  #m-sheet button svg { width: 20px; height: 20px; }
+  @keyframes sheet-in { from { opacity: 0; transform: translateY(26px); filter: blur(10px); } }
+
+  /* the pocket home */
+  .m-home .h-display { font-size: 36px; margin: 4px 0 18px; }
+  .m-home .pane { margin-bottom: 11px; }
+  .m-home .pane:active { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .m-home .stat-n { font-family: var(--font-display); font-size: 30px; font-weight: 500; line-height: 1.05; }
+}
+
 /* The system remains itself; it simply stops breathing. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
