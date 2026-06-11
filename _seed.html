@@ -1,0 +1,20 @@
+<!doctype html><meta charset=utf-8><body>seeding…<script>
+const b64=u=>btoa(String.fromCharCode(...u));
+(async()=>{
+  const ITERS=310000, pass="river-glass-2026", name="Gabriel · Mac";
+  let kp,alg; try{kp=await crypto.subtle.generateKey({name:"X25519"},true,["deriveBits"]);alg="X25519";}catch{kp=await crypto.subtle.generateKey({name:"ECDH",namedCurve:"P-256"},true,["deriveBits"]);alg="P-256";}
+  const privJwk=await crypto.subtle.exportKey("jwk",kp.privateKey); const pubRaw=new Uint8Array(await crypto.subtle.exportKey("raw",kp.publicKey));
+  const vault={name,alg,privJwk,pubRaw:b64(pubRaw),createdAt:Date.now(),store:{}};
+  const salt=crypto.getRandomValues(new Uint8Array(16));
+  const base=await crypto.subtle.importKey("raw",new TextEncoder().encode(pass),"PBKDF2",false,["deriveKey"]);
+  const key=await crypto.subtle.deriveKey({name:"PBKDF2",salt,iterations:ITERS,hash:"SHA-256"},base,{name:"AES-GCM",length:256},false,["encrypt","decrypt"]);
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const ct=new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM",iv},key,new TextEncoder().encode(JSON.stringify(vault))));
+  localStorage.setItem("friday.account.v1",JSON.stringify({v:1,name,salt:b64(salt),iters:ITERS,iv:b64(iv),ct:b64(ct)}));
+  location.replace("/index.html");
+})();
+</script>HTML
+CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+"$CHROME" --headless=new --disable-gpu --screenshot=/tmp/auth-unlock.png --window-size=1440,900 --force-device-scale-factor=2 --virtual-time-budget=8000 --hide-scrollbars "http://localhost:4173/_seed.html" 2>/dev/null
+rm -f /Users/gabrielrodriguez/Developer/OrangePie/Friday/_seed.html
+ls -la /tmp/auth-unlock.png 2>&1

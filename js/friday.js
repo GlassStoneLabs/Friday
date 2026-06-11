@@ -419,6 +419,14 @@ const E2E = {
     return this._init;
   },
 
+  // adopt a persisted account identity (decrypted from the vault on unlock)
+  adopt(idn) {
+    this.me = { privateKey: idn.priv, publicKey: idn.pub };
+    this.myPubRaw = idn.pubRaw; this.alg = idn.alg;
+    this.keys.clear();
+    this._init = Promise.resolve();
+  },
+
   async myPub() { await this.init(); return b64(this.myPubRaw); },
 
   fingerprint(aRaw, bRaw) {
@@ -463,6 +471,98 @@ const E2E = {
   },
 };
 
+/* ---------------- Account · encrypted local vault (no server) ----------------
+   Sign-in is real: a passphrase is stretched with PBKDF2-SHA-256
+   (310k iterations) into an AES-256-GCM key that encrypts a vault holding
+   your mesh identity (X25519 keypair) and profile. The passphrase and the
+   key are never stored — a wrong passphrase simply fails GCM authentication
+   and cannot decrypt. Everything sensitive is encrypted at rest in this
+   browser; nothing leaves the device. */
+const Account = {
+  KEY: "friday.account.v1",
+  ITERS: 310000,
+  identity: null,   // { priv, pub, pubRaw, alg }
+  name: null,
+  unlocked: false,
+  store: {},        // decrypted, in-memory "encrypted pages" (profile, notes…)
+
+  exists() { try { return !!localStorage.getItem(this.KEY); } catch { return false; } },
+  meta() { try { return JSON.parse(localStorage.getItem(this.KEY)); } catch { return null; } },
+
+  async deriveKey(pass, salt) {
+    const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pass), "PBKDF2", false, ["deriveKey"]);
+    return crypto.subtle.deriveKey(
+      { name: "PBKDF2", salt, iterations: this.ITERS, hash: "SHA-256" },
+      base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+  },
+
+  async writeVault(vault, pass, saltB64) {
+    const salt = saltB64 ? unb64(saltB64) : crypto.getRandomValues(new Uint8Array(16));
+    const key = await this.deriveKey(pass, salt);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(JSON.stringify(vault))));
+    localStorage.setItem(this.KEY, JSON.stringify({ v: 1, name: vault.name, salt: b64(salt), iters: this.ITERS, iv: b64(iv), ct: b64(ct) }));
+    this._key = key; this._salt = salt;
+  },
+
+  async signup(name, pass) {
+    let kp, alg;
+    try { kp = await crypto.subtle.generateKey({ name: "X25519" }, true, ["deriveBits"]); alg = "X25519"; }
+    catch { kp = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]); alg = "P-256"; }
+    const privJwk = await crypto.subtle.exportKey("jwk", kp.privateKey);
+    const pubRaw = new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey));
+    const vault = { name, alg, privJwk, pubRaw: b64(pubRaw), createdAt: Date.now(), store: {} };
+    await this.writeVault(vault, pass);
+    await this.activate(vault);
+  },
+
+  async unlock(pass) {
+    const o = this.meta();
+    if (!o) return false;
+    let vault;
+    try {
+      const key = await this.deriveKey(pass, unb64(o.salt));
+      vault = JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(o.iv) }, key, unb64(o.ct))));
+      this._key = key; this._salt = unb64(o.salt);
+    } catch { return false; }   // wrong passphrase → GCM auth fails
+    await this.activate(vault);
+    return true;
+  },
+
+  async activate(vault) {
+    const imp = vault.alg === "X25519" ? { name: "X25519" } : { name: "ECDH", namedCurve: "P-256" };
+    const priv = await crypto.subtle.importKey("jwk", vault.privJwk, imp, false, ["deriveBits"]);
+    const pubRaw = unb64(vault.pubRaw);
+    const pub = await crypto.subtle.importKey("raw", pubRaw, imp, false, []);
+    this.identity = { priv, pub, pubRaw, alg: vault.alg };
+    this.name = vault.name;
+    this.store = vault.store || {};
+    this.vault = vault;
+    this.unlocked = true;
+    E2E.adopt(this.identity);
+  },
+
+  // persist an "encrypted page" of app data back into the vault
+  async save(patch) {
+    if (!this.unlocked || !this._key) return;
+    Object.assign(this.store, patch);
+    this.vault.store = this.store;
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, this._key, new TextEncoder().encode(JSON.stringify(this.vault))));
+    localStorage.setItem(this.KEY, JSON.stringify({ v: 1, name: this.vault.name, salt: b64(this._salt), iters: this.ITERS, iv: b64(iv), ct: b64(ct) }));
+  },
+
+  lock() { this.unlocked = false; this.identity = null; this._key = null; this.store = {}; location.reload(); },
+  destroy() { try { localStorage.removeItem(this.KEY); } catch {} location.reload(); },
+
+  shortId() {
+    // a stable node id derived from the identity public key
+    let h = 0; const s = this.identity ? b64(this.identity.pubRaw) : "x";
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return "n-" + h.toString(36);
+  },
+};
+
 /* ---------------- Net · Dark Core transport (REAL, serverless) ----------------
    Two real backends, no server in the data path:
      • BroadcastChannel — every Friday tab/window/installed app on this
@@ -493,6 +593,7 @@ const Net = {
   emitMsg(m) { for (const f of this.msgSubs) try { f(m); } catch {} },
 
   async start() {
+    if (Account.unlocked) { this.name = Account.name; this.id = Account.shortId(); }
     this.pub = E2E.ok ? await E2E.myPub() : null;
     if ("BroadcastChannel" in globalThis) {
       this.bc = new BroadcastChannel("friday.dark-core");
@@ -1282,16 +1383,30 @@ Apps.settings = {
       ap.append(r1, r2, r3, r4);
       scroll.append(ap);
 
-      // profiles
+      // account — real, encrypted
       const pf = el("div", "pane set-section");
-      pf.append(el("div", "set-title", "Profiles"));
-      for (const [ini, name, sub, on] of [["GR", "Gabriel B. Rodriguez", "Owner · Glass Stone LLC · full mesh authority", true], ["GR", "After Hours", "Personal profile · separate keys, separate onion identity", false]]) {
+      pf.append(el("div", "set-title", "Account"));
+      if (Account.unlocked) {
+        const ini = Account.name.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
         const row = el("div", "set-row profile-card");
-        row.innerHTML = `<span class="who">${ini}</span><div style="flex:1"><div class="set-label">${name}</div><div class="set-sub">${sub}</div></div>`;
-        const s = el("button", "switch" + (on ? " on" : ""));
-        s.addEventListener("click", () => s.classList.toggle("on"));
-        row.append(s);
+        row.innerHTML = `<span class="who">${esc(ini)}</span><div style="flex:1"><div class="set-label">${esc(Account.name)}</div><div class="set-sub">Signed in · vault encrypted at rest · ${E2E.alg} identity</div></div><span class="mono" style="color:#2E7D4F">● UNLOCKED</span>`;
         pf.append(row);
+        const fpRow = el("div", "set-row");
+        fpRow.innerHTML = `<div><div class="set-label">Identity fingerprint</div><div class="set-sub mono" id="acct-fp">computing…</div></div>`;
+        pf.append(fpRow);
+        E2E.fingerprint(Account.identity.pubRaw, Account.identity.pubRaw).then((fp) => { const e = scroll.querySelector("#acct-fp"); if (e) e.textContent = fp; });
+        const acts = el("div", "set-row");
+        acts.style.gap = "10px";
+        const lock = el("button", "rail-item", "Lock now");
+        lock.style.cssText = "width:auto;background:color-mix(in srgb,var(--accent) 14%,transparent)";
+        lock.addEventListener("click", () => Account.lock());
+        const out = el("button", "rail-item", "Sign out & erase vault");
+        out.style.cssText = "width:auto;background:var(--pane-bg);border:1px solid var(--pane-edge)";
+        out.addEventListener("click", () => { if (confirm("Erase the encrypted vault on this device? It cannot be recovered.")) Account.destroy(); });
+        acts.append(lock, out);
+        pf.append(acts);
+      } else {
+        pf.append(el("div", "set-sub", E2E.ok ? "No account on this device." : "Encryption unavailable — serve over https or localhost to enable accounts."));
       }
       scroll.append(pf);
 
@@ -1386,6 +1501,7 @@ const MenuBar = {
         ["Settings…", () => WM.open("settings"), "⌘ ,"],
         ["Toggle Appearance", () => { State.theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark"; applyState(); }, "⇧ ⌘ D"],
         ["sep"],
+        ...(Account.unlocked ? [["Lock Friday", () => Account.lock(), "⌃ ⌘ Q"]] : []),
         ["Restart Friday", () => location.reload()],
       ];
       case "File": return [
@@ -1624,6 +1740,13 @@ const Mobile = {
       State.theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
       applyState();
     });
+    if (Account.unlocked) {
+      const lk = el("button", "", Icons.lock);
+      lk.setAttribute("aria-label", "Lock Friday");
+      lk.style.cssText = "width:40px;height:32px;border-radius:9px;display:grid;place-items:center";
+      lk.addEventListener("click", () => Account.lock());
+      $("#m-top").append(lk);
+    }
     $("#m-sheet-veil").addEventListener("click", (e) => {
       if (e.target.id === "m-sheet-veil") e.currentTarget.hidden = true;
     });
@@ -1708,31 +1831,94 @@ addEventListener("keydown", (e) => {
     State.theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
     applyState();
   }
+  if ((e.metaKey || e.ctrlKey) && e.ctrlKey && e.key.toLowerCase() === "q" && Account.unlocked) { e.preventDefault(); Account.lock(); }
   if (e.key === "Escape") { Spotlight.hide(); ControlCenter.hide(); MenuBar.hide(); }
 });
 
 const pocket = matchMedia("(max-width: 760px)");
 pocket.addEventListener("change", () => location.reload());
 
-applyState();
-Net.start();   // join the real Dark Core mesh immediately
+/* ============================================================
+   AUTH GATE · the encrypted lock screen
+   ============================================================ */
+const Auth = {
+  gate(onUnlock) {
+    // no WebCrypto (insecure context) → can't encrypt; let the user in with a notice
+    if (!E2E.ok) { onUnlock(); return; }
+    const veil = el("div", "lock-veil");
+    const mode = Account.exists() ? "in" : "up";
+    veil.innerHTML = `
+      <div class="lock-card glass">
+        <img src="assets/logo.svg" alt="" width="68" height="68">
+        <div class="lock-title h-display">${mode === "in" ? "Welcome back<em>.</em>" : "Create your account<em>.</em>"}</div>
+        <div class="lock-sub mono">${mode === "in" ? "EROS OFFICE · ENCRYPTED" : "EROS OFFICE · END-TO-END ENCRYPTED PAGES"}</div>
+        <form class="lock-form" autocomplete="off">
+          ${mode === "up" ? `<input class="lock-in" id="a-name" type="text" placeholder="Display name" autocomplete="off">` : `<div class="lock-name">${esc(Account.meta()?.name || "")}</div>`}
+          <input class="lock-in" id="a-pass" type="password" placeholder="${mode === "up" ? "Choose a passphrase" : "Passphrase"}" autocomplete="${mode === "up" ? "new-password" : "current-password"}">
+          ${mode === "up" ? `<input class="lock-in" id="a-pass2" type="password" placeholder="Confirm passphrase" autocomplete="new-password">` : ``}
+          <div class="lock-err" id="a-err"></div>
+          <button class="lock-btn" type="submit">${mode === "in" ? "Unlock" : "Create account"}</button>
+        </form>
+        <div class="lock-foot mono">${mode === "in"
+          ? `<button class="lock-link" id="a-reset">Forget this account</button>`
+          : `KEYS NEVER LEAVE THIS DEVICE · PBKDF2 · AES-256-GCM`}</div>
+      </div>`;
+    document.body.append(veil);
+    const err = veil.querySelector("#a-err");
+    const pass = veil.querySelector("#a-pass");
+    (veil.querySelector("#a-name") || pass).focus();
 
-if (pocket.matches) {
-  Mobile.build();
-} else {
-  WM.area = $("#windows");
-  Dock.build();
-  MenuBar.build();
-  Spotlight.build();
-  ControlCenter.build();
+    veil.querySelector(".lock-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.textContent = "";
+      const btn = veil.querySelector(".lock-btn");
+      try {
+        if (mode === "up") {
+          const name = veil.querySelector("#a-name").value.trim() || "Operator";
+          const p1 = pass.value, p2 = veil.querySelector("#a-pass2").value;
+          if (p1.length < 8) { err.textContent = "Use at least 8 characters."; return; }
+          if (p1 !== p2) { err.textContent = "Passphrases do not match."; return; }
+          btn.textContent = "Sealing…"; btn.disabled = true;
+          await Account.signup(name, p1);
+        } else {
+          if (!pass.value) { err.textContent = "Enter your passphrase."; return; }
+          btn.textContent = "Unlocking…"; btn.disabled = true;
+          const ok = await Account.unlock(pass.value);
+          if (!ok) { err.textContent = "Wrong passphrase — cannot decrypt."; btn.textContent = "Unlock"; btn.disabled = false; pass.select(); return; }
+        }
+        veil.classList.add("done");
+        setTimeout(() => { veil.remove(); onUnlock(); }, 360);
+      } catch (ex) { err.textContent = "Something went wrong. Try again."; btn.disabled = false; btn.textContent = mode === "in" ? "Unlock" : "Create account"; }
+    });
 
-  /* deep-link: friday/#ledger opens straight to a surface */
-  const deeplink = location.hash.slice(1);
-  if (deeplink && Apps[deeplink]) {
-    setTimeout(() => WM.open(deeplink), 1250);
+    veil.querySelector("#a-reset")?.addEventListener("click", () => {
+      if (confirm("Forget this account on this device? The encrypted vault is deleted and cannot be recovered without your passphrase.")) Account.destroy();
+    });
+  },
+};
+
+function bootApp() {
+  Net.start();   // join the real Dark Core mesh with the account identity
+
+  if (pocket.matches) {
+    Mobile.build();
   } else {
-    /* first morning on the river: open the mesh and the messages */
-    setTimeout(() => WM.open("mesh"), 1250);
-    setTimeout(() => { WM.open("messages"); Dock.refresh(); }, 1500);
+    WM.area = $("#windows");
+    Dock.build();
+    MenuBar.build();
+    Spotlight.build();
+    ControlCenter.build();
+
+    /* deep-link: friday/#ledger opens straight to a surface */
+    const deeplink = location.hash.slice(1);
+    if (deeplink && Apps[deeplink]) {
+      setTimeout(() => WM.open(deeplink), 250);
+    } else {
+      setTimeout(() => WM.open("mesh"), 250);
+      setTimeout(() => { WM.open("messages"); Dock.refresh(); }, 500);
+    }
   }
 }
+
+applyState();
+Auth.gate(bootApp);

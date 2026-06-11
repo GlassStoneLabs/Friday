@@ -576,6 +576,46 @@ input[type="range"]::-webkit-slider-thumb {
 ::selection { background: color-mix(in srgb, var(--accent) 26%, transparent); }
 :focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 1px; }
 
+/* ---------------- the encrypted lock screen ---------------- */
+.lock-veil {
+  position: fixed; inset: 0; z-index: 1000;
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+  background:
+    radial-gradient(1100px 480px at 78% -8%, rgba(216, 167, 42, 0.18), transparent 60%),
+    radial-gradient(1400px 700px at 18% 112%, rgba(26, 58, 92, 0.20), transparent 64%),
+    var(--ground);
+  animation: pane-in var(--t-pane) var(--ease);
+}
+.lock-veil.done { animation: boot-out var(--t-section) var(--ease) forwards; }
+.lock-card {
+  width: 380px; max-width: 100%;
+  border-radius: 22px; padding: 30px 28px;
+  display: flex; flex-direction: column; align-items: center; text-align: center; gap: 6px;
+}
+.lock-card img { border-radius: 17px; box-shadow: 0 14px 40px rgba(15, 15, 18, 0.28); margin-bottom: 6px; }
+.lock-title { font-size: 27px; }
+.lock-sub { color: var(--muted); margin-bottom: 14px; }
+.lock-name { font-weight: 600; font-size: 14px; padding: 4px 0 2px; }
+.lock-form { display: flex; flex-direction: column; gap: 9px; width: 100%; }
+.lock-in {
+  width: 100%; height: 42px; padding: 0 14px; border-radius: 12px;
+  background: var(--pane-bg); border: 1px solid var(--pane-edge); outline: none;
+  font-size: 14px;
+}
+.lock-in:focus { border-color: color-mix(in srgb, var(--accent) 45%, transparent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+.lock-err { color: var(--carmine); font-size: 11.5px; min-height: 14px; text-align: left; padding-left: 2px; }
+.lock-btn {
+  height: 42px; border-radius: 12px; font-weight: 600; font-size: 14px;
+  background: var(--accent); color: #F4EFE6;
+  transition: transform var(--t-hover) var(--ease), opacity var(--t-hover) var(--ease);
+}
+.lock-btn:hover { transform: translateY(-1px); }
+.lock-btn:disabled { opacity: .6; }
+.lock-foot { margin-top: 14px; color: var(--muted); letter-spacing: .14em; }
+.lock-link { color: var(--muted); text-decoration: underline; font: inherit; }
+.lock-link:hover { color: var(--accent); }
+
 /* ============================================================
    THE POCKET PANE — HDL §11.1, for Android & iOS
    In an app, Hudson Glass becomes the tab bar, the sheet, and

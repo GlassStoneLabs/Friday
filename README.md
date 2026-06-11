@@ -85,6 +85,18 @@ empty — nothing is faked. (E2E needs https or localhost; the Pages URL covers 
 Also: ⌘K search, Control Center (top right), live menu bar, three
 wallpapers, and `#app` deep-links (e.g. `…/Friday/#ledger`).
 
+**Accounts are real and encrypted — no server.** On first run Friday asks
+you to create an account: a display name and a passphrase. The passphrase
+is stretched with **PBKDF2-SHA-256 (310,000 iterations)** into an
+**AES-256-GCM** key that encrypts a vault holding your mesh identity
+(X25519 keypair) and profile, stored only in this browser. Signing in is
+genuine — the passphrase and key are never stored, so a wrong passphrase
+simply fails GCM authentication and **cannot** decrypt the vault. Your
+identity (and thus your mesh node) persists across sessions. Lock anytime
+from the Friday menu (⌃⌘Q) or the phone header; manage or erase the vault
+in **Settings ▸ Account**. (Needs https or localhost; on plain http the
+gate is skipped with a notice.)
+
 **Sending is really encrypted, to real peers.** Outgoing messages are
 sealed in the browser with WebCrypto — X25519 (or P-256) ECDH →
 HKDF-SHA-256 → AES-256-GCM, keyed to each recipient's real public key —
