@@ -1041,77 +1041,97 @@ Apps.calls = {
       ["Elena Lanot", "EL", "Dark Sun · Voice Lab"],
       ["Marcus Webb", "MW", "Dark Core · Routing"],
     ];
-    let active = 0, timer = null, t0 = 0;
+    let active = 0, state = "idle", t0 = 0;
+
+    /* every timer this surface starts is tracked here so end/close can never leak one */
+    const timers = new Set();
+    const after = (fn, ms) => { const id = setTimeout(() => { timers.delete(id); fn(); }, ms); timers.add(id); };
+    const every = (fn, ms) => timers.add(setInterval(fn, ms));
+    const clearAll = () => { for (const id of timers) { clearTimeout(id); clearInterval(id); } timers.clear(); };
 
     const rail = el("aside", "rail");
-    rail.append(el("div", "mono rail-head", "SECURE LINE"));
+    rail.append(el("div", "mono rail-head", `SECURE LINE<span class="call-rail-note">DIRECTORY PREVIEW · SAMPLE CONTACTS</span>`));
     const list = el("div");
     rail.append(list, el("div", "mono rail-foot", "GSM-FR · 1200 BPS · TRIPLE DH<br>KECCAK 1600/576 SPONGE DUPLEX"));
 
     const stage = el("section", "content");
     const inner = el("div", "call-stage");
-    stage.append(inner);
+    stage.append(inner, el("div", "mono call-note", "VOICE PIPELINE PREVIEW — NO AUDIO LEAVES THIS DEVICE"));
     body.append(rail, stage);
 
     const drawRail = () => {
       list.replaceChildren();
       contacts.forEach(([name, ini], i) => {
         const b = el("button", "rail-item" + (i === active ? " active" : ""));
-        b.innerHTML = `<span class="who" style="width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:9px;font-weight:600;background:color-mix(in srgb,var(--rule) 18%,transparent)">${ini}</span> ${name}`;
-        b.addEventListener("click", () => { if (!timer) { active = i; drawIdle(); drawRail(); } });
+        b.innerHTML = `<span class="who" style="width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:9px;font-weight:600;background:color-mix(in srgb,var(--rule) 18%,transparent)">${ini}</span> ${esc(name)}`;
+        b.addEventListener("click", () => { if (state === "idle" && active !== i) { active = i; drawIdle(); drawRail(); } });
         list.append(b);
       });
     };
 
     const drawIdle = () => {
+      clearAll();
+      state = "idle";
       inner.classList.remove("live");
       const [name, ini, sub] = contacts[active];
       inner.innerHTML = `
         <div class="call-avatar">${ini}</div>
-        <div class="call-name">${name}</div>
-        <div class="call-sub">${sub}</div>
+        <div class="call-name">${esc(name)}</div>
+        <div class="call-sub">${esc(sub)}</div>
         <div class="mono kicker">LINE IS DARK · READY TO SEAL</div>
-        <div class="call-actions"><button class="call-btn go" aria-label="Call">${Icons.phone}</button></div>`;
+        <div class="call-actions"><button class="call-btn go" aria-label="Call ${esc(name)} (preview)">${Icons.phone}</button></div>`;
       inner.querySelector(".go").addEventListener("click", connect);
     };
 
     const connect = () => {
+      if (state !== "idle") return;
+      clearAll();
+      state = "connecting";
       const [name, ini] = contacts[active];
       inner.innerHTML = `
         <div class="call-avatar">${ini}</div>
-        <div class="call-name">${name}</div>
+        <div class="call-name">${esc(name)}</div>
         <div class="call-sub">Negotiating Triple Diffie-Hellman…</div>
-        <div class="mono kicker">CURVE 25519 · HOP 1 · HOP 2 · HOP 3</div>`;
-      setTimeout(live, 1500);
+        <div class="mono kicker">CURVE 25519 · HOP 1 · HOP 2 · HOP 3</div>
+        <div class="call-actions"><button class="call-btn end" aria-label="Cancel call">${Icons.phoneDown}</button></div>`;
+      const cancel = inner.querySelector(".end");
+      cancel.addEventListener("click", () => drawIdle());
+      cancel.focus();
+      after(live, 1500);
     };
 
     const live = () => {
-      if (!inner.isConnected) return;
+      if (state !== "connecting" || !inner.isConnected) { clearAll(); return; }
+      clearAll();
+      state = "live";
       const [name, ini] = contacts[active];
       inner.classList.add("live");
       inner.innerHTML = `
         <div class="call-avatar">${ini}</div>
-        <div class="call-name">${name}</div>
+        <div class="call-name">${esc(name)}</div>
         <div class="call-sub" id="call-clock">00:00</div>
         <div class="wave">${"<i></i>".repeat(16)}</div>
         <div class="mono kicker">SEALED · GSM-FR · 1200 BPS · ONION 3 HOPS</div>
         <div class="call-actions">
-          <button class="call-btn mute" aria-label="Mute">${Icons.mic}</button>
+          <button class="call-btn mute" aria-label="Mute" aria-pressed="false">${Icons.mic}</button>
           <button class="call-btn end" aria-label="End call">${Icons.phoneDown}</button>
         </div>`;
       t0 = Date.now();
       const clock = inner.querySelector("#call-clock");
-      timer = setInterval(() => {
+      every(() => {
         const s = (Date.now() - t0) / 1000 | 0;
         clock.textContent = String(s / 60 | 0).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
       }, 500);
-      inner.querySelector(".mute").addEventListener("click", (e) => e.currentTarget.classList.toggle("on"));
-      inner.querySelector(".end").addEventListener("click", () => { clearInterval(timer); timer = null; drawIdle(); });
+      const mute = inner.querySelector(".mute");
+      mute.addEventListener("click", () => mute.setAttribute("aria-pressed", String(mute.classList.toggle("on"))));
+      const end = inner.querySelector(".end");
+      end.addEventListener("click", () => drawIdle());
+      end.focus();
     };
 
     drawRail();
     drawIdle();
-    this.teardown = () => { clearInterval(timer); timer = null; };
+    this.teardown = () => { clearAll(); state = "idle"; };
   },
 };
 

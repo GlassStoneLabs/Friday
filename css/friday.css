@@ -449,13 +449,22 @@ html[data-theme="dark"][data-wallpaper="limestone"] #wallpaper {
 @keyframes wv { from { height: 6px; opacity: .5; } to { height: 30px; opacity: 1; } }
 .call-actions { display: flex; gap: 14px; margin-top: 6px; }
 .call-btn {
+  position: relative;
   width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center;
-  color: #F4EFE6; transition: transform var(--t-hover) var(--ease);
+  color: #F4EFE6;
+  transition: transform var(--t-hover) var(--ease), background var(--t-hover) var(--ease), color var(--t-hover) var(--ease);
 }
 .call-btn:hover { transform: scale(1.07); }
 .call-btn.go { background: #2E7D4F; }
 .call-btn.end { background: var(--carmine); }
 .call-btn.mute { background: color-mix(in srgb, var(--body) 22%, transparent); color: var(--body); }
+.call-btn.mute.on { background: var(--body); color: var(--ground); }
+.call-btn.mute.on::after {
+  content: ""; position: absolute; width: 24px; height: 2px; border-radius: 1px;
+  background: currentColor; transform: rotate(-45deg);
+}
+.call-rail-note { display: block; margin-top: 3px; opacity: .72; }
+.call-note { flex: 0 0 auto; text-align: center; color: var(--muted); padding: 0 22px 14px; }
 
 /* ---------- vault ---------- */
 .file-row {
