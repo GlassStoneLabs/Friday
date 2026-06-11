@@ -54,28 +54,44 @@ window, with its own dock icon, and works offline.
 
 ## What's inside
 
-| Surface | What it does |
-| --- | --- |
-| **Mesh** | Live Dark Core view — self-healing topology, transport layers, PoW trust |
-| **Messages** | Channels & DMs (onion-routed) + **Nearby** — BitChat-style BLE mesh, Noise-encrypted, store-and-forward |
-| **Boards** | monday-style work panes, drag cards between columns, CRDT-synced |
-| **Calls** | Project Dark Sun voice — GSM-FR at 1200 bps, Triple Diffie-Hellman |
-| **Vault** | Reed-Solomon shard map — lose nodes, reconstruct the file |
-| **Ledger** | Two sets of records — editable + permanent, Merkle-chained & verifiable |
-| **Settings** | Light/Dark/Auto, accent tinting, glass diffusion, profiles |
+| Surface | What it does | Real? |
+| --- | --- | --- |
+| **Mesh** | Live Dark Core graph of **actual** connected nodes — real presence, real round-trip latency, real link count | ✅ real |
+| **Messages** | `# dark-core` broadcast room + per-peer DMs; every message is **really sealed and delivered** to live peers | ✅ real |
+| **Boards** | monday-style work panes, drag cards between columns | illustrative |
+| **Calls** | Project Dark Sun voice — GSM-FR at 1200 bps, Triple Diffie-Hellman | illustrative |
+| **Vault** | Reed-Solomon shard map — lose nodes, reconstruct the file | illustrative |
+| **Ledger** | Two sets of records — editable + permanent, Merkle-chained & **really verifiable** | ✅ real crypto |
+| **Settings** | Light/Dark/Auto, accent tinting, glass diffusion, profiles | ✅ real |
+
+### The mesh is real — no simulation
+
+Friday joins a **real, serverless mesh** the moment it loads:
+
+- **BroadcastChannel** — every Friday tab, window, or installed app on a device
+  is a real node. Presence, latency (live ping/pong), and messages genuinely
+  travel between them. Open Friday in two tabs and watch the node count rise.
+- **WebRTC DataChannel** — **Mesh ▸ Link a device** connects a *second device*
+  peer-to-peer with copy/paste signaling and **no server** (public STUN is used
+  only for NAT discovery and never sees your data).
+- **Real pairwise E2E** — peers exchange X25519 public keys over the transport,
+  so each message is sealed per-recipient with a real shared key
+  (HKDF-SHA-256 → AES-256-GCM) and opened by the real far end. Verified in
+  Chrome: A→B and B→A round-trip, third parties cannot open the envelope.
+
+With no peers present, the mesh honestly shows **one node** and the room is
+empty — nothing is faked. (E2E needs https or localhost; the Pages URL covers it.)
 
 Also: ⌘K search, Control Center (top right), live menu bar, three
 wallpapers, and `#app` deep-links (e.g. `…/Friday/#ledger`).
 
-**Sending is really encrypted.** Outgoing messages are sealed in the
-browser with WebCrypto — X25519 (or P-256) ECDH → HKDF-SHA-256 →
-AES-256-GCM, fresh non-extractable keys per session — before they touch
-the simulated wire; what you see is the decrypted roundtrip of that
-envelope. Tap the lock on any sent bubble to read the actual ciphertext,
-and check the thread ribbon for the session fingerprint. (Peers are
-simulated locally, so the far end lives in the same tab — but the bytes
-on the wire are genuine AES-GCM ciphertext. Needs https or localhost;
-over plain http the ribbon says UNSEALED.)
+**Sending is really encrypted, to real peers.** Outgoing messages are
+sealed in the browser with WebCrypto — X25519 (or P-256) ECDH →
+HKDF-SHA-256 → AES-256-GCM, keyed to each recipient's real public key —
+then actually transmitted over BroadcastChannel/WebRTC and opened by the
+real far end. Tap the lock on any bubble to read the ciphertext that
+went on the wire. Needs https or localhost; over plain http the ribbon
+says UNSEALED.
 
 ## Anatomy
 

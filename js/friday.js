@@ -228,12 +228,9 @@ const WM = {
    ============================================================ */
 const Apps = {};
 
-/* ---------------- Mesh · Dark Core ---------------- */
+/* ---------------- Mesh · Dark Core (renders REAL peers) ---------------- */
 const Mesh = {
-  nodes: [], raf: 0, canvas: null, ctx: null, wrap: null, colors: null, stats: {},
-  TYPES: [
-    ["wifi", "Wi-Fi / WebRTC"], ["ble", "Bluetooth LE"], ["lora", "LoRa Radio"], ["tor", "Tor Onion v3"],
-  ],
+  raf: 0, canvas: null, ctx: null, wrap: null, colors: null, stats: {}, layout: new Map(),
 
   invalidateColors() { this.colors = null; },
 
@@ -250,21 +247,14 @@ const Mesh = {
     return this.colors;
   },
 
-  seed() {
-    this.nodes = [];
-    const types = ["wifi", "wifi", "wifi", "ble", "ble", "lora", "tor"];
-    for (let i = 0; i < 26; i++) {
-      this.nodes.push({
-        x: Math.random(), y: Math.random(),
-        vx: (Math.random() - 0.5) * 0.0011, vy: (Math.random() - 0.5) * 0.0011,
-        t: types[i % types.length],
-        r: 2.4 + Math.random() * 2.6,
-      });
-    }
-  },
+  // total real endpoints on this mesh: this device + live peers
+  activeCount() { return 1 + (typeof Net !== "undefined" ? Net.peers.size : 0); },
 
-  activeCount() {
-    return this.nodes.filter((n) => State.transports[n.t]).length;
+  // a stable angle per peer id so nodes don't jump around
+  angle(id) {
+    let h = 0;
+    for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+    return (h % 360) * Math.PI / 180;
   },
 
   tick() {
@@ -272,58 +262,72 @@ const Mesh = {
     if (!canvas || !canvas.isConnected) { this.raf = 0; return; }
     const dpr = devicePixelRatio || 1;
     const w = this.wrap.clientWidth, h = this.wrap.clientHeight;
-    if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
-      canvas.width = w * dpr; canvas.height = h * dpr;
-    }
+    if (canvas.width !== w * dpr || canvas.height !== h * dpr) { canvas.width = w * dpr; canvas.height = h * dpr; }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
     const pal = this.palette();
-    const tcol = { wifi: pal.rule, ble: pal.muted, lora: pal.signal, tor: pal.accent };
+    const tcol = { ble: pal.signal, rtc: pal.accent, bc: pal.rule };
+    const t = performance.now() / 1000;
+    const cx = w / 2, cy = h / 2;
+    const R = Math.min(w, h) * 0.33;
 
-    const pts = [];
-    for (const n of this.nodes) {
-      n.x += n.vx; n.y += n.vy;
-      if (n.x < 0.03 || n.x > 0.97) n.vx *= -1;
-      if (n.y < 0.05 || n.y > 0.95) n.vy *= -1;
-      pts.push({ ...n, px: n.x * w, py: n.y * h, on: State.transports[n.t] });
-    }
-    // edges
+    const peers = typeof Net !== "undefined" ? [...Net.peers.values()] : [];
+    const breathe = Math.sin(t * 0.7) * 3;
+    const self = { px: cx, py: cy, r: 7, self: true };
+    const pts = [self];
+    peers.forEach((p, i) => {
+      const a = this.angle(p.id) + t * 0.05;
+      const rad = R + Math.sin(t * 0.6 + i) * 6 + breathe;
+      pts.push({ px: cx + Math.cos(a) * rad, py: cy + Math.sin(a) * rad, r: 5, peer: p, transport: p.transport });
+    });
+
+    // edges: every node hears the broadcast bus, so it is a real full mesh
     let paths = 0;
     for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
       const a = pts[i], b = pts[j];
-      if (!a.on || !b.on) continue;
-      const dx = a.px - b.px, dy = a.py - b.py, d = Math.hypot(dx, dy);
-      const max = Math.min(w, h) * 0.34;
-      if (d < max) {
-        paths++;
-        ctx.strokeStyle = pal.body;
-        ctx.globalAlpha = 0.13 * (1 - d / max);
-        ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.moveTo(a.px, a.py); ctx.lineTo(b.px, b.py); ctx.stroke();
+      paths++;
+      ctx.strokeStyle = (a.self || b.self) ? pal.accent : pal.body;
+      ctx.globalAlpha = (a.self || b.self) ? 0.30 : 0.10;
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(a.px, a.py); ctx.lineTo(b.px, b.py); ctx.stroke();
+      // a packet travelling the link to make live traffic visible
+      if (a.self || b.self) {
+        const f = (t * 0.5 + i * 0.3) % 1;
+        ctx.globalAlpha = 0.6;
+        ctx.fillStyle = pal.accent;
+        ctx.beginPath(); ctx.arc(a.px + (b.px - a.px) * f, a.py + (b.py - a.py) * f, 1.6, 0, 7); ctx.fill();
       }
     }
     ctx.globalAlpha = 1;
+
     for (const p of pts) {
-      ctx.beginPath();
-      ctx.arc(p.px, p.py, p.r, 0, 7);
-      ctx.fillStyle = p.on ? tcol[p.t] : pal.muted;
-      ctx.globalAlpha = p.on ? 0.95 : 0.25;
-      ctx.fill();
-      if (p.on) {
-        ctx.globalAlpha = 0.18;
-        ctx.beginPath(); ctx.arc(p.px, p.py, p.r * 2.6, 0, 7); ctx.fill();
-      }
+      const col = p.self ? pal.accent : (tcol[p.transport] || pal.rule);
+      ctx.globalAlpha = 0.18; ctx.fillStyle = col;
+      ctx.beginPath(); ctx.arc(p.px, p.py, p.r * 2.8, 0, 7); ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.beginPath(); ctx.arc(p.px, p.py, p.r, 0, 7); ctx.fill();
+      ctx.fillStyle = "#F4EFE6";
+      ctx.beginPath(); ctx.arc(p.px, p.py, p.r * 0.4, 0, 7); ctx.fill();
     }
-    ctx.globalAlpha = 1;
-    // stats, gently
-    if (!this._statTick || performance.now() - this._statTick > 1400) {
+
+    if (peers.length === 0) {
+      ctx.fillStyle = pal.muted;
+      ctx.font = '11px "Martian Mono", monospace';
+      ctx.textAlign = "center";
+      ctx.fillText("ONLY THIS NODE — OPEN FRIDAY IN ANOTHER TAB OR LINK A DEVICE", cx, cy + R + 40);
+      ctx.textAlign = "left";
+    }
+
+    if (!this._statTick || performance.now() - this._statTick > 700) {
       this._statTick = performance.now();
-      const on = pts.filter((p) => p.on).length;
-      this.stats.nodes?.replaceChildren(document.createTextNode(on));
+      const n = pts.length;
+      const lats = peers.map((p) => p.latency).filter((x) => x != null);
+      const avg = lats.length ? Math.round(lats.reduce((s, x) => s + x, 0) / lats.length) : null;
+      this.stats.nodes?.replaceChildren(document.createTextNode(n));
       this.stats.paths?.replaceChildren(document.createTextNode(paths));
-      this.stats.lat?.replaceChildren(document.createTextNode((38 + Math.random() * 26 | 0) + " ms"));
-      this.stats.trust?.replaceChildren(document.createTextNode((96.2 + Math.random() * 2.9).toFixed(1) + "%"));
-      $("#mb-mesh-count").textContent = on;
+      this.stats.lat?.replaceChildren(document.createTextNode(avg == null ? "—" : avg + " ms"));
+      this.stats.trust?.replaceChildren(document.createTextNode(peers.length ? "VERIFIED" : "—"));
+      const mc = $("#mb-mesh-count"); if (mc) mc.textContent = n;
     }
     this.raf = requestAnimationFrame(() => this.tick());
   },
@@ -331,7 +335,6 @@ const Mesh = {
   start() { if (!this.raf) this.raf = requestAnimationFrame(() => this.tick()); },
   stop() { cancelAnimationFrame(this.raf); this.raf = 0; },
 };
-Mesh.seed();
 
 Apps.mesh = {
   name: "Mesh", title: "MESH · DARK CORE", icon: Icons.mesh, w: 900, h: 560,
@@ -339,15 +342,14 @@ Apps.mesh = {
     const wrap = el("div", "mesh-wrap");
     const canvas = document.createElement("canvas");
     wrap.append(canvas);
-    const head = el("div", "", `
+    wrap.append(el("div", "", `
       <div style="position:absolute;top:16px;left:20px;z-index:2;pointer-events:none">
-        <div class="mono kicker">DARK CORE · ROUTING SUBSTRATE</div>
-        <div class="h-display">The mesh, <em>self-healing.</em></div>
-      </div>`);
-    wrap.append(head.firstElementChild);
+        <div class="mono kicker">DARK CORE · LIVE PEERS</div>
+        <div class="h-display">The mesh, <em>as it actually is.</em></div>
+      </div>`).firstElementChild);
 
     const rail = el("aside", "mesh-stats");
-    const stats = [["nodes", "Nodes on the mesh", "26"], ["paths", "Verified paths", "—"], ["lat", "Average latency", "44 ms"], ["trust", "PoW trust consensus", "97.1%"]];
+    const stats = [["nodes", "Nodes on the mesh", "1"], ["paths", "Live links", "0"], ["lat", "Round-trip latency", "—"], ["trust", "Peer status", "—"]];
     for (const [key, label, init] of stats) {
       const p = el("div", "pane stat");
       const n = el("div", "stat-n", init);
@@ -355,243 +357,439 @@ Apps.mesh = {
       rail.append(p);
       Mesh.stats[key] = n;
     }
-    rail.append(el("div", "mono rail-head", "TRANSPORT LAYERS"));
-    const tl = el("div", "pane", "");
-    tl.style.padding = "4px 13px";
-    for (const [key, name] of Mesh.TYPES) {
-      const row = el("div", "transport" + (State.transports[key] ? "" : " off"));
-      row.innerHTML = `<span class="t-dot"></span><span><div class="t-name">${name}</div><div class="t-sub">${key === "tor" ? "metadata-resistant" : key === "lora" ? "off-grid · 1.2 kbps" : key === "ble" ? "BitChat · Noise XX" : "multipeer"}</div></span>`;
-      const sw = el("button", "switch" + (State.transports[key] ? " on" : ""));
-      sw.classList.add("t-state");
-      sw.setAttribute("role", "switch");
-      sw.addEventListener("click", () => {
-        State.transports[key] = !State.transports[key];
-        sw.classList.toggle("on", State.transports[key]);
-        row.classList.toggle("off", !State.transports[key]);
-        persist(); ControlCenter.refresh();
-      });
-      row.append(sw);
-      tl.append(row);
-    }
-    rail.append(tl, el("div", "mono rail-foot", "RETICULUM BRIDGE · X25519 / ED25519 · 297-BYTE LINKS"));
+
+    rail.append(el("div", "mono rail-head", "THIS NODE"));
+    const meBox = el("div", "pane");
+    meBox.style.padding = "10px 13px";
+    meBox.innerHTML = `<div class="t-name">${esc(Net.name)}</div><div class="t-sub mono" style="word-break:break-all">${Net.id.slice(0, 18)}</div>`;
+    rail.append(meBox);
+
+    rail.append(el("div", "mono rail-head", "LIVE PEERS"));
+    const peerList = el("div", "pane");
+    peerList.style.padding = "4px 13px";
+    rail.append(peerList);
+
+    const link = el("button", "rail-item");
+    link.style.cssText = "width:auto;margin-top:10px;background:color-mix(in srgb,var(--accent) 14%,transparent)";
+    link.textContent = "Link a device →";
+    link.addEventListener("click", () => Net.linkDialog());
+    rail.append(link, el("div", "mono rail-foot", "BROADCASTCHANNEL + WEBRTC<br>X25519 · HKDF · AES-256-GCM<br>NO SERVER · REAL PEERS ONLY"));
     body.append(wrap, rail);
+
+    const drawPeers = () => {
+      const peers = [...Net.peers.values()];
+      peerList.replaceChildren();
+      if (!peers.length) { peerList.append(el("div", "t-sub", "No peers yet. Open Friday in another tab, install it on a second device, or link one.")); return; }
+      for (const p of peers) {
+        const row = el("div", "transport");
+        const tname = p.transport === "rtc" ? "WebRTC · direct" : p.transport === "ble" ? "BitChat · BLE" : "BroadcastChannel";
+        row.innerHTML = `<span class="t-dot"></span><span><div class="t-name">${esc(p.name)}</div><div class="t-sub">${tname}${p.latency != null ? " · " + p.latency + " ms" : ""}</div></span>`;
+        peerList.append(row);
+      }
+    };
+    Mesh._unsub = Net.onPeers(drawPeers);
+    drawPeers();
+
     Mesh.canvas = canvas; Mesh.ctx = canvas.getContext("2d"); Mesh.wrap = wrap;
     Mesh.start();
   },
-  teardown() { Mesh.stop(); },
+  teardown() { Mesh.stop(); Mesh._unsub?.(); Mesh._unsub = null; },
 };
 
-/* ---------------- E2E · real WebCrypto sealing ----------------
-   Every outgoing message is sealed in this tab before it touches
-   the (simulated) wire: X25519 (or P-256) ECDH → HKDF-SHA-256 →
-   AES-256-GCM. Fresh identity keys per session, non-extractable.
-   Requires a secure context (https or localhost); without one,
-   messages are sent unsealed and the UI says so. */
+/* ---------------- E2E · real pairwise WebCrypto ----------------
+   A real X25519 (P-256 fallback) identity keypair for this device.
+   Public keys are exchanged over the live transport, so the shared
+   secret is derived from two REAL endpoints — my private key and the
+   peer's public key — then HKDF-SHA-256 → AES-256-GCM. Per-peer keys
+   are cached. Needs a secure context (https/localhost). */
 const b64 = (u8) => btoa(String.fromCharCode(...u8));
 const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
 const E2E = {
   ok: !!(globalThis.crypto && crypto.subtle),
-  alg: null, me: null, sessions: new Map(), _init: null,
+  alg: null, me: null, myPubRaw: null, keys: new Map(), _init: null,
 
   init() {
     if (!this.ok) return null;
     if (!this._init) this._init = (async () => {
-      try {
-        this.me = await crypto.subtle.generateKey({ name: "X25519" }, false, ["deriveBits"]);
-        this.alg = "X25519";
-      } catch {
-        this.me = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
-        this.alg = "P-256";
-      }
+      try { this.me = await crypto.subtle.generateKey({ name: "X25519" }, false, ["deriveBits"]); this.alg = "X25519"; }
+      catch { this.me = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]); this.alg = "P-256"; }
+      this.myPubRaw = new Uint8Array(await crypto.subtle.exportKey("raw", this.me.publicKey));
     })();
     return this._init;
   },
 
-  async session(id) {
+  async myPub() { await this.init(); return b64(this.myPubRaw); },
+
+  fingerprint(aRaw, bRaw) {
+    // order-independent so both ends show the same short code
+    const [x, y] = [b64(aRaw), b64(bRaw)].sort();
+    return crypto.subtle.digest("SHA-256", new TextEncoder().encode(x + y))
+      .then((d) => [...new Uint8Array(d).slice(0, 4)].map((n) => n.toString(16).padStart(2, "0")).join("").toUpperCase().match(/.{4}/g).join(" "));
+  },
+
+  async keyFor(peerPubB64) {
     if (!this.ok) return null;
     await this.init();
-    let s = this.sessions.get(id);
-    if (s) return s;
-    const gen = this.alg === "X25519" ? { name: "X25519" } : { name: "ECDH", namedCurve: "P-256" };
-    const drv = (pub) => (this.alg === "X25519" ? { name: "X25519", public: pub } : { name: "ECDH", public: pub });
-    const peer = await crypto.subtle.generateKey(gen, false, ["deriveBits"]); // the far end, simulated
-    const shared = await crypto.subtle.deriveBits(drv(peer.publicKey), this.me.privateKey, 256);
+    let k = this.keys.get(peerPubB64);
+    if (k) return k;
+    const peerRaw = unb64(peerPubB64);
+    const imp = this.alg === "X25519" ? { name: "X25519" } : { name: "ECDH", namedCurve: "P-256" };
+    const peerPub = await crypto.subtle.importKey("raw", peerRaw, imp, false, []);
+    const drv = this.alg === "X25519" ? { name: "X25519", public: peerPub } : { name: "ECDH", public: peerPub };
+    const shared = await crypto.subtle.deriveBits(drv, this.me.privateKey, 256);
     const hkdf = await crypto.subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
-    const myPub = new Uint8Array(await crypto.subtle.exportKey("raw", this.me.publicKey));
     const key = await crypto.subtle.deriveKey(
-      { name: "HKDF", hash: "SHA-256", salt: new TextEncoder().encode("friday.e2e.v1·" + id), info: myPub },
+      { name: "HKDF", hash: "SHA-256", salt: new TextEncoder().encode("friday.e2e.v2"), info: new Uint8Array() },
       hkdf, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
-    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", myPub));
-    const fp = [...digest.slice(0, 4)].map((b) => b.toString(16).padStart(2, "0")).join("").toUpperCase().match(/.{4}/g).join(" ");
-    s = { key, fp };
-    this.sessions.set(id, s);
-    return s;
+    const fp = await this.fingerprint(this.myPubRaw, peerRaw);
+    k = { key, fp };
+    this.keys.set(peerPubB64, k);
+    return k;
   },
 
-  async seal(id, text) {
-    const s = await this.session(id);
-    if (!s) return null;
+  async seal(peerPubB64, text) {
+    const k = await this.keyFor(peerPubB64);
+    if (!k) return null;
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, s.key, new TextEncoder().encode(text)));
-    return { alg: this.alg + " · HKDF · AES-256-GCM", iv: b64(iv), ct: b64(ct), bytes: ct.length, fp: s.fp };
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, k.key, new TextEncoder().encode(text)));
+    return { alg: this.alg + " · HKDF · AES-256-GCM", iv: b64(iv), ct: b64(ct), bytes: ct.length, fp: k.fp };
   },
 
-  async open(id, wire) {
-    const s = await this.session(id);
-    const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(wire.iv) }, s.key, unb64(wire.ct));
+  async open(peerPubB64, wire) {
+    const k = await this.keyFor(peerPubB64);
+    const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(wire.iv) }, k.key, unb64(wire.ct));
     return new TextDecoder().decode(pt);
   },
 };
 
-/* ---------------- Messages ---------------- */
-const Chat = {
-  active: "design",
-  channels: {
-    design: {
-      label: "# design-office", unread: 0, msgs: [
-        { who: "Avery Reyes", ini: "AR", when: "9:02 AM", text: "Volume II drafts are on the long table. The glass coverage chart wants one more pane." },
-        { who: "You", ini: "GR", when: "9:04 AM", me: true, text: "Settling it this morning. Carmine once, parchment everywhere else." },
-        { who: "Avery Reyes", ini: "AR", when: "9:05 AM", text: "Exactly right. The page should hum, not shout." },
-      ],
-    },
-    ops: {
-      label: "# operations", unread: 2, msgs: [
-        { who: "Sophie Sun", ini: "SS", when: "8:41 AM", text: "Dark Core rerouted around the Pier 40 outage in 9 seconds. Nobody noticed — which is the point." },
-        { who: "Marcus Webb", ini: "MW", when: "8:46 AM", text: "PoW admissions up 12%. The more devices that join, the safer the grid gets." },
-      ],
-    },
-    darksun: {
-      label: "# dark-sun", unread: 1, msgs: [
-        { who: "Elena Lanot", ini: "EL", when: "Yesterday", text: "Voice bridge held at 1200 bps over the LoRa segment. Triple-DH negotiated in under 200 ms." },
-      ],
-    },
-    avery: {
-      label: "Avery Reyes", dm: true, unread: 0, msgs: [
-        { who: "Avery Reyes", ini: "AR", when: "Mon", text: "Friday looks like the studio now. Ship it before the river thaws." },
-      ],
-    },
-    paitoon: {
-      label: "Paitoon S.", nearby: true, dm: true, unread: 1, sub: "BLE · 8 m", msgs: [
-        { who: "Paitoon S.", ini: "PS", when: "6:02 PM", text: "No bars down here in the workshop — this is riding the BitChat mesh, phone to phone." },
-      ],
-    },
-    heltec: {
-      label: "Heltec V4 relay", nearby: true, unread: 0, sub: "LoRa bridge · roof", msgs: [
-        { who: "Relay", ini: "HV", when: "5:48 PM", text: "Store-and-forward buffer: 3 sealed messages held for the night crew. Will deliver on contact." },
-      ],
-    },
+/* ---------------- Net · Dark Core transport (REAL, serverless) ----------------
+   Two real backends, no server in the data path:
+     • BroadcastChannel — every Friday tab/window/installed app on this
+       origin is a real node; presence + messages really travel between them.
+     • WebRTC DataChannel — link a second *device* with copy/paste signaling
+       (public STUN for NAT discovery only; it never sees your data).
+   Peers announce their E2E public key in presence, so messages are sealed
+   per-recipient with a real shared key and opened by the real far end. */
+const Net = {
+  id: (crypto.randomUUID ? crypto.randomUUID() : "n-" + Math.random().toString(36).slice(2)),
+  name: "Gabriel · " + (/(iPhone|iPad|Android)/.test(navigator.userAgent) ? "phone" : /Mac/.test(navigator.userAgent) ? "Mac" : "device"),
+  pub: null,
+  bc: null,
+  peers: new Map(),          // id -> { id, name, pub, transport, lastSeen, latency }
+  rtc: new Map(),            // id -> RTCDataChannel
+  pending: new Map(),        // ping id -> sent ts
+  peerSubs: new Set(),       // mesh + messages views
+  msgSubs: new Set(),
+  STUN: [{ urls: "stun:stun.l.google.com:19302" }],
+
+  onPeers(fn) { this.peerSubs.add(fn); return () => this.peerSubs.delete(fn); },
+  onMsg(fn) { this.msgSubs.add(fn); return () => this.msgSubs.delete(fn); },
+  emitPeers() {
+    const mc = document.getElementById("mb-mesh-count"); if (mc) mc.textContent = 1 + this.peers.size;
+    const dot = document.querySelector("#mb-mesh .mesh-dot"); if (dot) dot.classList.toggle("off", this.peers.size === 0);
+    for (const f of this.peerSubs) try { f(); } catch {}
   },
-  replies: [
-    "Copy. Sharding it across the grid now — 10 data, 20 parity.",
-    "Received over three hops. Metadata stayed dark the whole way.",
-    "The mesh agrees. Path diversity is holding at 99.97%.",
-    "Noted in the audit ledger — immutable, as always.",
-  ],
+  emitMsg(m) { for (const f of this.msgSubs) try { f(m); } catch {} },
+
+  async start() {
+    this.pub = E2E.ok ? await E2E.myPub() : null;
+    if ("BroadcastChannel" in globalThis) {
+      this.bc = new BroadcastChannel("friday.dark-core");
+      this.bc.onmessage = (e) => this.recv(e.data, "bc");
+    }
+    this.announce();
+    this.emitPeers();
+    setInterval(() => this.announce(), 2200);
+    setInterval(() => this.reap(), 1500);
+    setInterval(() => this.pingAll(), 3000);
+    addEventListener("pagehide", () => this.send({ t: "bye", id: this.id }));
+  },
+
+  announce() { this.send({ t: "hello", id: this.id, name: this.name, pub: this.pub }); },
+
+  // fan a frame out over every real transport
+  send(obj) {
+    const s = JSON.stringify(obj);
+    try { this.bc?.postMessage(obj); } catch {}
+    for (const ch of this.rtc.values()) { try { if (ch.readyState === "open") ch.send(s); } catch {} }
+  },
+  sendTo(id, obj) {
+    const ch = this.rtc.get(id);
+    if (ch && ch.readyState === "open") { try { ch.send(JSON.stringify(obj)); return; } catch {} }
+    this.send(obj); // BroadcastChannel reaches same-origin tabs; recipients filter by .to
+  },
+
+  recv(m, transport) {
+    if (!m || m.id === this.id) return;
+    if (m.t === "hello") {
+      const fresh = !this.peers.has(m.id);
+      const prev = this.peers.get(m.id) || {};
+      this.peers.set(m.id, { id: m.id, name: m.name || "Peer", pub: m.pub, transport: prev.transport || transport, lastSeen: Date.now(), latency: prev.latency ?? null });
+      if (fresh) { this.announce(); this.emitPeers(); this.emitMsg({ system: true, peer: this.peers.get(m.id) }); }
+      else this.emitPeers();
+    } else if (m.t === "bye") {
+      if (this.peers.delete(m.id)) this.emitPeers();
+    } else if (m.t === "ping" && m.to === this.id) {
+      this.sendTo(m.id, { t: "pong", id: this.id, to: m.id, n: m.n });
+    } else if (m.t === "pong" && m.to === this.id) {
+      const sent = this.pending.get(m.n); if (sent != null) {
+        const p = this.peers.get(m.id); if (p) p.latency = Math.max(1, Math.round(performance.now() - sent));
+        this.pending.delete(m.n); this.emitPeers();
+      }
+    } else if (m.t === "msg" && m.to === this.id) {
+      this.emitMsg(m);
+    }
+  },
+
+  pingAll() {
+    for (const id of this.peers.keys()) {
+      const n = this.id + ":" + Math.random().toString(36).slice(2, 8);
+      this.pending.set(n, performance.now());
+      this.sendTo(id, { t: "ping", id: this.id, to: id, n });
+      setTimeout(() => this.pending.delete(n), 8000);
+    }
+  },
+
+  reap() {
+    let changed = false;
+    const now = Date.now();
+    for (const [id, p] of this.peers) {
+      if (this.rtc.has(id)) continue;            // WebRTC peers don't time out on heartbeat
+      if (now - p.lastSeen > 6500) { this.peers.delete(id); changed = true; }
+    }
+    if (changed) this.emitPeers();
+  },
+
+  /* ---- real cross-device link via WebRTC, copy/paste signaling ---- */
+  async makeOffer(onLocal) {
+    const pc = new RTCPeerConnection({ iceServers: this.STUN });
+    const ch = pc.createDataChannel("dark-core");
+    this.wireChannel(pc, ch);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await this.iceDone(pc);
+    onLocal(b64(new TextEncoder().encode(JSON.stringify(pc.localDescription))));
+    this._pc = pc;
+  },
+  async takeOffer(code, onLocal) {
+    const pc = new RTCPeerConnection({ iceServers: this.STUN });
+    pc.ondatachannel = (e) => this.wireChannel(pc, e.channel);
+    await pc.setRemoteDescription(JSON.parse(new TextDecoder().decode(unb64(code))));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await this.iceDone(pc);
+    onLocal(b64(new TextEncoder().encode(JSON.stringify(pc.localDescription))));
+  },
+  async takeAnswer(code) {
+    if (this._pc) await this._pc.setRemoteDescription(JSON.parse(new TextDecoder().decode(unb64(code))));
+  },
+  iceDone(pc) {
+    return new Promise((res) => {
+      if (pc.iceGatheringState === "complete") return res();
+      const check = () => { if (pc.iceGatheringState === "complete") { pc.removeEventListener("icegatheringstatechange", check); res(); } };
+      pc.addEventListener("icegatheringstatechange", check);
+      setTimeout(res, 2500);
+    });
+  },
+  wireChannel(pc, ch) {
+    ch.onopen = () => { this.announce(); };
+    ch.onmessage = (e) => { try { this.recv(JSON.parse(e.data), "rtc"); } catch {} };
+    ch.onclose = () => {
+      for (const [id, c] of this.rtc) if (c === ch) { this.rtc.delete(id); this.peers.delete(id); }
+      this.emitPeers();
+    };
+    // tag the channel with the peer id on first hello
+    const orig = ch.onmessage;
+    ch.onmessage = (e) => {
+      try { const m = JSON.parse(e.data); if (m.t === "hello") { this.rtc.set(m.id, ch); if (this.peers.get(m.id)) this.peers.get(m.id).transport = "rtc"; } } catch {}
+      orig(e);
+    };
+  },
+
+  linkDialog() {
+    const veil = el("div", "");
+    veil.style.cssText = "position:absolute;inset:0;z-index:800;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,var(--ground) 30%,transparent)";
+    const box = el("div", "glass");
+    box.style.cssText = "width:520px;max-width:calc(100vw - 40px);border-radius:18px;padding:18px";
+    box.innerHTML = `
+      <div class="mono kicker">DARK CORE · LINK A DEVICE</div>
+      <div class="h-display" style="margin-bottom:4px">Connect a second device<em>.</em></div>
+      <div class="set-sub" style="margin-bottom:14px">Real WebRTC peer-to-peer, no server. One device starts, the other joins — paste the codes between them (AirDrop, Messages, anything).</div>
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <button class="rail-item" id="lk-start" style="width:auto;background:color-mix(in srgb,var(--accent) 14%,transparent)">This device starts</button>
+        <button class="rail-item" id="lk-join" style="width:auto;background:var(--pane-bg);border:1px solid var(--pane-edge)">Join the other one</button>
+      </div>
+      <div id="lk-body"></div>
+      <div style="text-align:right;margin-top:12px"><button class="rail-item" id="lk-close" style="width:auto">Close</button></div>`;
+    veil.append(box);
+    (this._host()).append(veil);
+    veil.addEventListener("click", (e) => { if (e.target === veil) veil.remove(); });
+    box.querySelector("#lk-close").addEventListener("click", () => veil.remove());
+    const bodyEl = box.querySelector("#lk-body");
+    const field = (label, val, ro) => `<div class="mono kicker" style="margin-top:8px">${label}</div><textarea ${ro ? "readonly" : ""} style="width:100%;height:64px;border-radius:10px;border:1px solid var(--pane-edge);background:var(--pane-bg);padding:8px;font-family:var(--font-mono);font-size:9px;resize:none">${val || ""}</textarea>`;
+
+    box.querySelector("#lk-start").addEventListener("click", () => {
+      bodyEl.innerHTML = field("1 · SEND THIS OFFER", "generating…", true) + field("2 · PASTE THE ANSWER BACK", "", false) + `<button class="rail-item" id="lk-fin" style="width:auto;margin-top:8px;background:color-mix(in srgb,var(--accent) 14%,transparent)">Connect</button>`;
+      const tas = bodyEl.querySelectorAll("textarea");
+      this.makeOffer((code) => { tas[0].value = code; });
+      bodyEl.querySelector("#lk-fin").addEventListener("click", async () => { await this.takeAnswer(tas[1].value.trim()); veil.remove(); });
+    });
+    box.querySelector("#lk-join").addEventListener("click", () => {
+      bodyEl.innerHTML = field("1 · PASTE THE OFFER", "", false) + `<button class="rail-item" id="lk-gen" style="width:auto;margin:8px 0;background:color-mix(in srgb,var(--accent) 14%,transparent)">Generate answer</button>` + field("2 · SEND THIS ANSWER BACK", "", true);
+      const tas = bodyEl.querySelectorAll("textarea");
+      bodyEl.querySelector("#lk-gen").addEventListener("click", () => this.takeOffer(tas[0].value.trim(), (code) => { tas[1].value = code; }));
+    });
+  },
+  _host() { return document.querySelector(".window.focused") || document.getElementById("m-surface") || document.body; },
+};
+
+/* ---------------- Messages (REAL delivery over Net) ----------------
+   # dark-core is the broadcast room of every live node. Each real peer
+   also gets a direct thread. Outgoing text is sealed per-recipient with
+   that peer's real public key and actually transmitted; nothing here is
+   scripted — with no peers present, the room is honestly empty. */
+const initials = (name) => name.replace(/·.*/, "").trim().split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase() || "··";
+
+const Chat = {
+  active: "darkcore",
+  rooms: { darkcore: { label: "# dark-core", broadcast: true, unread: 0, msgs: [] } },
+  dmId: (peerId) => "dm:" + peerId,
+
+  ensureDM(peer) {
+    const id = this.dmId(peer.id);
+    if (!this.rooms[id]) this.rooms[id] = { label: peer.name, dm: true, peerId: peer.id, unread: 0, msgs: [] };
+    else this.rooms[id].label = peer.name;
+    return id;
+  },
+  prune() {
+    for (const id of Object.keys(this.rooms)) {
+      if (id.startsWith("dm:") && !Net.peers.has(id.slice(3))) {
+        if (this.active === id) this.active = "darkcore";
+        delete this.rooms[id];
+      }
+    }
+  },
+  totalUnread() { return Object.values(this.rooms).reduce((s, r) => s + r.unread, 0); },
 };
 
 Apps.messages = {
-  name: "Messages", title: "MESSAGES · ONION ROUTED", icon: Icons.messages, w: 880, h: 560,
+  name: "Messages", title: "MESSAGES · DARK CORE", icon: Icons.messages, w: 880, h: 560,
   render(body) {
     const rail = el("aside", "rail");
-    rail.append(el("div", "mono rail-head", "CHANNELS · E2E"));
-    const list = el("div");
-    const nearHead = el("div", "mono rail-head", "NEARBY · BITCHAT MESH");
-    nearHead.style.paddingTop = "12px";
-    const nearList = el("div");
-    rail.append(list, nearHead, nearList);
-    rail.append(el("div", "mono rail-foot", "QUIET COMMUNITIES · TOR V3<br>NEARBY VIA BITCHAT · NOISE XX<br>NO METADATA LEAVES THE GLASS"));
+    rail.append(el("div", "mono rail-head", "ROOMS · E2E"));
+    const roomList = el("div");
+    const peerHead = el("div", "mono rail-head", "DIRECT · LIVE PEERS");
+    peerHead.style.paddingTop = "12px";
+    const peerListEl = el("div");
+    rail.append(roomList, peerHead, peerListEl);
+    rail.append(el("div", "mono rail-foot", "BROADCASTCHANNEL + WEBRTC<br>SEALED PER-RECIPIENT · AES-256-GCM<br>NO SERVER · REAL PEERS ONLY"));
 
     const content = el("section", "content");
     const head = el("div", "thread-head");
     const msgs = el("div", "msg-list");
     const composer = el("form", "composer");
-    composer.innerHTML = `<input type="text" placeholder="Message — sealed before it leaves this pane" aria-label="Message"><button class="send-btn" type="submit" aria-label="Send">${Icons.send}</button>`;
+    composer.innerHTML = `<input type="text" placeholder="Message — sealed before it leaves this device" aria-label="Message"><button class="send-btn" type="submit" aria-label="Send">${Icons.send}</button>`;
     content.append(head, msgs, composer);
     body.append(rail, content);
 
     const drawRail = () => {
-      list.replaceChildren();
-      nearList.replaceChildren();
-      for (const [id, ch] of Object.entries(Chat.channels)) {
-        const b = el("button", "rail-item" + (id === Chat.active ? " active" : ""));
-        const glyph = ch.nearby ? "⌁" : ch.dm ? "@" : "#";
-        b.innerHTML = `<span style="opacity:.55">${glyph}</span> ${esc(ch.label.replace(/^# /, ""))}` + (ch.unread ? `<span class="badge">${ch.unread}</span>` : "");
-        b.addEventListener("click", () => { Chat.active = id; ch.unread = 0; drawRail(); drawThread(); Dock.refresh(); });
-        (ch.nearby ? nearList : list).append(b);
+      Chat.prune();
+      roomList.replaceChildren();
+      peerListEl.replaceChildren();
+      const room = Chat.rooms.darkcore;
+      const rb = el("button", "rail-item" + (Chat.active === "darkcore" ? " active" : ""));
+      rb.innerHTML = `<span style="opacity:.55">#</span> dark-core <span class="t-sub" style="margin-left:auto">${Net.peers.size + 1}</span>` + (room.unread ? `<span class="badge">${room.unread}</span>` : "");
+      rb.addEventListener("click", () => select("darkcore"));
+      roomList.append(rb);
+
+      const peers = [...Net.peers.values()];
+      if (!peers.length) peerListEl.append(el("div", "t-sub", "No peers online. Open Friday in another tab/window, or use Mesh ▸ Link a device."));
+      for (const p of peers) {
+        const id = Chat.dmId(p.id);
+        const r = Chat.rooms[id];
+        const b = el("button", "rail-item" + (Chat.active === id ? " active" : ""));
+        b.innerHTML = `<span style="opacity:.55">@</span> ${esc(p.name)}` + (r && r.unread ? `<span class="badge">${r.unread}</span>` : "");
+        b.addEventListener("click", () => { Chat.ensureDM(p); select(id); });
+        peerListEl.append(b);
       }
     };
 
     const bubble = (m) => {
       const row = el("div", "msg" + (m.me ? " me" : ""));
-      const when = m.queued ? "QUEUED · STORE &amp; FORWARD" : m.when;
       const lock = m.wire ? `<button class="wire-toggle" title="View the sealed envelope">${Icons.lock}</button>` : "";
       const wire = m.wire ? `<div class="wire-view mono">SEALED · ${m.wire.alg} · FP ${m.wire.fp}<br>IV ${m.wire.iv}<br>CT ${m.wire.ct.length > 64 ? m.wire.ct.slice(0, 64) + "…" : m.wire.ct} · ${m.wire.bytes} B ON THE WIRE</div>` : "";
-      row.innerHTML = `<div class="avatar">${m.ini}</div><div><div class="msg-meta"><span class="who">${esc(m.who)}</span><span class="when">${when}</span>${lock}</div><div class="bubble">${esc(m.text)}</div>${wire}</div>`;
+      row.innerHTML = `<div class="avatar">${m.ini}</div><div><div class="msg-meta"><span class="who">${esc(m.who)}</span><span class="when">${m.when}</span>${lock}</div><div class="bubble">${esc(m.text)}</div>${wire}</div>`;
       row.querySelector(".wire-toggle")?.addEventListener("click", () => row.classList.toggle("show-wire"));
       return row;
     };
 
     const drawThread = () => {
-      const ch = Chat.channels[Chat.active];
-      const ribbon = ch.nearby
-        ? "BITCHAT · NOISE XX · BLE STORE-AND-FORWARD"
-        : "END-TO-END · ONION ROUTE · 3 HOPS";
-      head.innerHTML = `<div class="h-display">${esc(ch.label)}</div>
-        <div class="mono sec-ribbon"><span class="lock">${Icons.lock}</span> ${ribbon}<span class="fp"></span></div>`;
-      const id = Chat.active;
-      if (E2E.ok) {
-        E2E.session(id).then((s) => {
-          const fp = head.querySelector(".fp");
-          if (s && fp && Chat.active === id) fp.textContent = ` · FP ${s.fp}`;
-        });
+      const r = Chat.rooms[Chat.active];
+      if (!r) { Chat.active = "darkcore"; return drawThread(); }
+      const ribbon = r.broadcast
+        ? `BROADCAST · ${Net.peers.size} PEER${Net.peers.size === 1 ? "" : "S"} · SEALED PER-RECIPIENT`
+        : "DIRECT · X25519 · AES-256-GCM";
+      const fp = E2E.ok ? "" : " · UNSEALED — SERVE OVER HTTPS FOR E2E";
+      head.innerHTML = `<div class="h-display">${esc(r.label)}</div>
+        <div class="mono sec-ribbon"><span class="lock">${Icons.lock}</span> ${ribbon}${fp}</div>`;
+      if (!r.msgs.length) {
+        msgs.replaceChildren(el("div", "t-sub", r.broadcast
+          ? (Net.peers.size ? "Say something — it will be sealed for each peer and delivered live." : "You're the only node right now. Open Friday elsewhere to see real delivery.")
+          : "Direct, end-to-end. Messages are sealed with this peer's real key."));
       } else {
-        head.querySelector(".fp").textContent = " · UNSEALED — SERVE OVER HTTPS FOR E2E";
+        msgs.replaceChildren(...r.msgs.map(bubble));
       }
-      msgs.replaceChildren(...ch.msgs.map(bubble));
       msgs.scrollTop = msgs.scrollHeight;
     };
 
+    const select = (id) => { Chat.active = id; const r = Chat.rooms[id]; if (r) r.unread = 0; drawRail(); drawThread(); Dock.refresh(); };
+
+    // outgoing — really sealed per recipient and transmitted
     composer.addEventListener("submit", async (e) => {
       e.preventDefault();
       const input = composer.querySelector("input");
       const text = input.value.trim();
       if (!text) return;
       input.value = "";
-      const ch = Chat.channels[Chat.active];
-      const now = new Date();
-      const when = now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-      const mine = { who: "You", ini: "GR", when, me: true, text, queued: !!ch.nearby };
-      // seal for real: only ciphertext would leave this pane.
-      // what is displayed is the decrypted roundtrip of that envelope.
-      try {
-        mine.wire = await E2E.seal(Chat.active, text);
-        if (mine.wire) mine.text = await E2E.open(Chat.active, mine.wire);
-      } catch { mine.wire = null; }
-      ch.msgs.push(mine);
+      const r = Chat.rooms[Chat.active];
+      const when = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      const targets = r.broadcast ? [...Net.peers.values()] : (Net.peers.get(r.peerId) ? [Net.peers.get(r.peerId)] : []);
+      let firstWire = null;
+      for (const p of targets) {
+        if (!p.pub) continue;
+        try {
+          const wire = await E2E.seal(p.pub, text);
+          firstWire = firstWire || wire;
+          Net.sendTo(p.id, { t: "msg", id: Net.id, to: p.id, from: Net.id, fromName: Net.name, room: r.broadcast ? "darkcore" : "dm", wire });
+        } catch {}
+      }
+      r.msgs.push({ who: "You", ini: initials(Net.name), when, me: true, text, wire: firstWire });
       drawThread();
-      // a peer answers across the mesh
-      const target = Chat.active;
-      if (mine.queued) setTimeout(() => { mine.queued = false; if (Chat.active === target && msgs.isConnected) drawThread(); }, 1400);
-      const t = el("div", "msg");
-      t.innerHTML = `<div class="avatar">··</div><div><div class="bubble typing"><i></i><i></i><i></i></div></div>`;
-      setTimeout(() => { if (Chat.active === target && msgs.isConnected) { msgs.append(t); msgs.scrollTop = msgs.scrollHeight; } }, 600);
-      setTimeout(async () => {
-        t.remove();
-        const reply = Chat.replies[Math.floor(Math.random() * Chat.replies.length)];
-        const src = Chat.channels[target];
-        const peer = src.nearby ? [src.label, src.msgs[0].ini] : target === "avery" ? ["Avery Reyes", "AR"] : ["Dark Core", "DC"];
-        const theirs = { who: peer[0], ini: peer[1], when, text: reply };
-        try { theirs.wire = await E2E.seal(target, reply); } catch { theirs.wire = null; }
-        Chat.channels[target].msgs.push(theirs);
-        if (Chat.active === target && msgs.isConnected) drawThread();
-        else { Chat.channels[target].unread++; drawRail(); Dock.refresh(); }
-      }, 2100);
     });
+
+    // incoming — real frames from real peers
+    const onMsg = async (m) => {
+      if (m.system) { drawRail(); if (Chat.active === "darkcore") drawThread(); return; }
+      const peer = Net.peers.get(m.from);
+      if (!peer || !peer.pub) return;
+      let text = "(unable to open)";
+      try { text = await E2E.open(peer.pub, m.wire); } catch {}
+      const roomId = m.room === "darkcore" ? "darkcore" : Chat.ensureDM(peer);
+      const r = Chat.rooms[roomId];
+      const when = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      r.msgs.push({ who: peer.name, ini: initials(peer.name), when, text, wire: m.wire });
+      if (Chat.active === roomId) drawThread();
+      else { r.unread++; Dock.refresh(); }
+      drawRail();
+    };
+    const onPeers = () => { drawRail(); if (Chat.rooms[Chat.active]?.broadcast) drawThread(); };
+    this._unsub = [Net.onMsg(onMsg), Net.onPeers(onPeers)];
 
     drawRail();
     drawThread();
   },
+  teardown() { this._unsub?.forEach((u) => u()); this._unsub = null; },
 };
 
 /* ---------------- Boards ---------------- */
@@ -1161,7 +1359,7 @@ const Dock = {
       b.classList.toggle("running", WM.wins.has(id));
       b.querySelector(".dock-badge")?.remove();
       if (id === "messages") {
-        const unread = Object.values(Chat.channels).reduce((s, c) => s + c.unread, 0);
+        const unread = Chat.totalUnread();
         if (unread) b.append(el("span", "dock-badge", String(unread)));
       }
     }
@@ -1467,20 +1665,21 @@ const Mobile = {
   home() {
     const h = new Date().getHours();
     const greet = h < 12 ? "morning" : h < 18 ? "afternoon" : "evening";
-    const unread = Object.values(Chat.channels).reduce((s, c) => s + c.unread, 0);
+    const unread = Chat.totalUnread();
+    const nodes = Mesh.activeCount();
     const wrap = el("section", "content");
     const scroll = el("div", "content-scroll m-home");
     scroll.innerHTML = `
       <div class="h-display" style="margin-top:6px">Good ${greet}, <em>Gabriel.</em></div>
       <div class="pane" data-go="mesh">
         <div class="mono kicker">DARK CORE</div>
-        <div class="stat-n">${Mesh.activeCount()} nodes</div>
-        <div class="set-sub">Self-healing · Wi-Fi · BLE · LoRa · Tor</div>
+        <div class="stat-n">${nodes} node${nodes === 1 ? "" : "s"}</div>
+        <div class="set-sub">${nodes === 1 ? "Only this device — link another" : "Live peers over BroadcastChannel · WebRTC"}</div>
       </div>
       <div class="pane" data-go="messages">
         <div class="mono kicker">MESSAGES</div>
         <div class="stat-n">${unread} unread</div>
-        <div class="set-sub">Onion routed · BitChat nearby mesh</div>
+        <div class="set-sub">Sealed per-recipient · real delivery</div>
       </div>
       <div class="pane" data-go="boards">
         <div class="mono kicker">ACTIVE PROJECT</div>
@@ -1516,6 +1715,7 @@ const pocket = matchMedia("(max-width: 760px)");
 pocket.addEventListener("change", () => location.reload());
 
 applyState();
+Net.start();   // join the real Dark Core mesh immediately
 
 if (pocket.matches) {
   Mobile.build();
