@@ -1896,8 +1896,9 @@ pocket.addEventListener("change", () => location.reload());
    ============================================================ */
 const Auth = {
   gate(onUnlock) {
-    // no WebCrypto (insecure context) → can't encrypt; let the user in with a notice
-    if (!E2E.ok) { onUnlock(); return; }
+    // no WebCrypto (insecure context) → can't encrypt; let the user in with a notice.
+    // ?guest=1 starts an ephemeral session (fresh keys, nothing persisted) — also the e2e hook.
+    if (!E2E.ok || new URLSearchParams(location.search).has("guest")) { onUnlock(); return; }
     const veil = el("div", "lock-veil");
     const mode = Account.exists() ? "in" : "up";
     veil.innerHTML = `
