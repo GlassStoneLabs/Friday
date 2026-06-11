@@ -948,6 +948,21 @@ Apps.messages = {
 
 /* ---------------- Boards ---------------- */
 const Board = {
+  KEY: "friday.board.v1",
+  load() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(this.KEY) || "null");
+      if (!Array.isArray(saved)) return;
+      for (const col of this.cols) {
+        const s = saved.find((x) => x && x.id === col.id);
+        if (s && Array.isArray(s.cards))
+          col.cards = s.cards.filter((k) => k && typeof k.t === "string").map((k) => ({ t: k.t, tag: typeof k.tag === "string" ? k.tag : "DESIGN", who: typeof k.who === "string" ? k.who : "GR" }));
+      }
+    } catch {}
+  },
+  save() {
+    try { localStorage.setItem(this.KEY, JSON.stringify(this.cols.map(({ id, cards }) => ({ id, cards })))); } catch {}
+  },
   cols: [
     { id: "backlog", name: "Backlog", color: "#7A7770", cards: [
       { t: "LoRa transceiver firmware — needle MTU tuning", tag: "DARK CORE", who: "MW" },
@@ -966,6 +981,7 @@ const Board = {
     ]},
   ],
 };
+Board.load();
 
 Apps.boards = {
   name: "Boards", title: "BOARDS · EROS OFFICE", icon: Icons.boards, w: 940, h: 560,
@@ -989,27 +1005,58 @@ Apps.boards = {
         c.dataset.col = col.id;
         c.innerHTML = `<div class="col-head mono"><span class="col-dot" style="background:${col.color}"></span>${col.name.toUpperCase()}<span class="count">${col.cards.length}</span></div>`;
         const drop = el("div", "col-drop");
+        const ci = Board.cols.indexOf(col);
+        const prev = Board.cols[ci - 1], next = Board.cols[ci + 1];
         col.cards.forEach((card, i) => {
           const k = el("div", "card");
           k.draggable = true;
+          k.tabIndex = 0;
+          k.setAttribute("aria-label", `${card.t} — ${col.name}`);
           k.innerHTML = `<div class="card-title">${esc(card.t)}</div>
-            <div class="card-row"><span class="tag" style="background:${tagColor[card.tag] || "var(--pane-bg)"}">${card.tag}</span><span class="who">${card.who}</span></div>`;
+            <div class="card-row"><span class="tag" style="background:${tagColor[card.tag] || "var(--pane-bg)"}">${esc(card.tag)}</span><span class="card-move"><button class="mv" data-dir="-1" aria-label="${prev ? `Move to ${esc(prev.name)}` : "First column"}"${prev ? "" : " disabled"}>‹</button><button class="mv" data-dir="1" aria-label="${next ? `Move to ${esc(next.name)}` : "Last column"}"${next ? "" : " disabled"}>›</button></span><span class="who">${esc(card.who)}</span></div>`;
+          const move = (dir) => {
+            const to = Board.cols[ci + dir];
+            if (!to) return;
+            col.cards.splice(i, 1);
+            to.cards.push(card);
+            Board.save();
+            draw();
+            board.querySelector(`[data-col="${to.id}"]`)?.querySelectorAll(".card")[to.cards.length - 1]?.focus();
+          };
+          k.querySelectorAll(".mv").forEach((b) => b.addEventListener("click", () => move(+b.dataset.dir)));
+          k.addEventListener("keydown", (e) => {
+            if (e.key === "ArrowLeft") { e.preventDefault(); move(-1); }
+            else if (e.key === "ArrowRight") { e.preventDefault(); move(1); }
+          });
           k.addEventListener("dragstart", () => { dragSrc = { col: col.id, i }; k.classList.add("dragging"); });
-          k.addEventListener("dragend", () => k.classList.remove("dragging"));
+          k.addEventListener("dragend", () => { k.classList.remove("dragging"); dragSrc = null; });
           drop.append(k);
         });
+        if (!col.cards.length) drop.append(el("div", "col-empty mono", "no panes"));
         const add = el("button", "add-card", "+ New pane");
         add.addEventListener("click", () => {
+          const open = drop.querySelector("input");
+          if (open) { open.focus(); return; }
+          drop.querySelector(".col-empty")?.remove();
           const inp = el("input");
           inp.type = "text"; inp.placeholder = "Name the work, then Enter";
+          inp.setAttribute("aria-label", `New pane in ${col.name}`);
           Object.assign(inp.style, { padding: "9px 12px", borderRadius: "12px", border: "1px solid var(--pane-edge)", background: "var(--pane-bg)", outline: "none", width: "100%" });
           drop.append(inp); inp.focus();
-          const commit = () => {
-            if (inp.value.trim()) col.cards.push({ t: inp.value.trim(), tag: "DESIGN", who: "GR" });
+          let done = false;
+          const finish = (commit, refocus) => {
+            if (done) return;
+            done = true;
+            const t = inp.value.trim();
+            if (commit && t) { col.cards.push({ t, tag: "DESIGN", who: "GR" }); Board.save(); }
             draw();
+            if (refocus) board.querySelector(`[data-col="${col.id}"] .add-card`)?.focus();
           };
-          inp.addEventListener("keydown", (e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") draw(); });
-          inp.addEventListener("blur", commit);
+          inp.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") finish(true, true);
+            else if (e.key === "Escape") { e.stopPropagation(); finish(false, true); }
+          });
+          inp.addEventListener("blur", () => finish(true, false));
         });
         c.append(drop, add);
         c.addEventListener("dragover", (e) => { e.preventDefault(); c.classList.add("drag-over"); });
@@ -1020,8 +1067,10 @@ Apps.boards = {
           if (!dragSrc) return;
           const from = Board.cols.find((x) => x.id === dragSrc.col);
           const [card] = from.cards.splice(dragSrc.i, 1);
-          col.cards.push(card);
           dragSrc = null;
+          if (!card) return;
+          col.cards.push(card);
+          Board.save();
           draw();
         });
         board.append(c);
