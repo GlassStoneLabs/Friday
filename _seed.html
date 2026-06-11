@@ -1,4 +1,4 @@
-<!doctype html><meta charset=utf-8><body>seeding…<script>
+<!doctype html><meta charset=utf-8><title>seeded-then-app</title><body>seeding…<script>
 const b64=u=>btoa(String.fromCharCode(...u));
 (async()=>{
   const ITERS=310000, pass="river-glass-2026", name="Gabriel · Mac";
@@ -11,10 +11,13 @@ const b64=u=>btoa(String.fromCharCode(...u));
   const iv=crypto.getRandomValues(new Uint8Array(12));
   const ct=new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM",iv},key,new TextEncoder().encode(JSON.stringify(vault))));
   localStorage.setItem("friday.account.v1",JSON.stringify({v:1,name,salt:b64(salt),iters:ITERS,iv:b64(iv),ct:b64(ct)}));
-  location.replace("/index.html");
+  document.body.textContent="seeded — open index.html next";
 })();
 </script>HTML
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-"$CHROME" --headless=new --disable-gpu --screenshot=/tmp/auth-unlock.png --window-size=1440,900 --force-device-scale-factor=2 --virtual-time-budget=8000 --hide-scrollbars "http://localhost:4173/_seed.html" 2>/dev/null
-rm -f /Users/gabrielrodriguez/Developer/OrangePie/Friday/_seed.html
+PROFILE=/tmp/friday-prof-$$
+"$CHROME" --headless=new --disable-gpu --user-data-dir="$PROFILE" --virtual-time-budget=3000 --dump-dom "http://localhost:4173/_seed.html" >/dev/null 2>&1
+sleep 1
+"$CHROME" --headless=new --disable-gpu --user-data-dir="$PROFILE" --screenshot=/tmp/auth-unlock.png --window-size=1440,900 --force-device-scale-factor=2 --virtual-time-budget=6000 --hide-scrollbars "http://localhost:4173/index.html" >/dev/null 2>&1
+rm -f /Users/gabrielrodriguez/Developer/OrangePie/Friday/_seed.html; rm -rf "$PROFILE"
 ls -la /tmp/auth-unlock.png 2>&1

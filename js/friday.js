@@ -640,6 +640,8 @@ const Net = {
       }
     } else if (m.t === "msg" && m.to === this.id) {
       this.emitMsg(m);
+    } else if (m.t === "typing" && (m.to === this.id || (!m.to && m.room === "darkcore"))) {
+      this.emitMsg(m);
     }
   },
 
@@ -825,6 +827,35 @@ Apps.messages = {
       return row;
     };
 
+    // real typing indicators — peers announce, rows auto-expire
+    const typers = new Map();   // roomId -> Map(peerId -> expiresAt)
+    const typingRows = (roomId) => {
+      const t = typers.get(roomId);
+      if (!t || !t.size) return [];
+      return [...t.keys()].map((pid) => {
+        const peer = Net.peers.get(pid);
+        if (!peer) return null;
+        const row = el("div", "msg is-typing");
+        row.innerHTML = `<div class="avatar">${initials(peer.name)}</div><div><div class="msg-meta"><span class="who">${esc(peer.name)}</span><span class="when">TYPING…</span></div><div class="bubble typing"><i></i><i></i><i></i></div></div>`;
+        return row;
+      }).filter(Boolean);
+    };
+    const noteTyping = (roomId, peerId) => {
+      if (!typers.has(roomId)) typers.set(roomId, new Map());
+      typers.get(roomId).set(peerId, Date.now() + 3200);
+      if (Chat.active === roomId) drawThread();
+    };
+    const clearTyping = (roomId, peerId) => {
+      typers.get(roomId)?.delete(peerId);
+    };
+    const pruneTyping = setInterval(() => {
+      const now = Date.now();
+      let changed = false;
+      for (const [room, t] of typers) for (const [pid, exp] of t)
+        if (exp < now || !Net.peers.has(pid)) { t.delete(pid); if (Chat.active === room) changed = true; }
+      if (changed) drawThread();
+    }, 900);
+
     const drawThread = () => {
       const r = Chat.rooms[Chat.active];
       if (!r) { Chat.active = "darkcore"; return drawThread(); }
@@ -834,17 +865,31 @@ Apps.messages = {
       const fp = E2E.ok ? "" : " · UNSEALED — SERVE OVER HTTPS FOR E2E";
       head.innerHTML = `<div class="h-display">${esc(r.label)}</div>
         <div class="mono sec-ribbon"><span class="lock">${Icons.lock}</span> ${ribbon}${fp}</div>`;
-      if (!r.msgs.length) {
+      const rows = r.msgs.map(bubble).concat(typingRows(Chat.active));
+      if (!rows.length) {
         msgs.replaceChildren(el("div", "t-sub", r.broadcast
           ? (Net.peers.size ? "Say something — it will be sealed for each peer and delivered live." : "You're the only node right now. Open Friday elsewhere to see real delivery.")
           : "Direct, end-to-end. Messages are sealed with this peer's real key."));
       } else {
-        msgs.replaceChildren(...r.msgs.map(bubble));
+        msgs.replaceChildren(...rows);
       }
       msgs.scrollTop = msgs.scrollHeight;
     };
 
     const select = (id) => { Chat.active = id; const r = Chat.rooms[id]; if (r) r.unread = 0; drawRail(); drawThread(); Dock.refresh(); };
+
+    // tell the room I'm typing — throttled, direct in DMs, broadcast in #dark-core
+    let lastTyping = 0;
+    composer.querySelector("input").addEventListener("input", (e) => {
+      if (!e.target.value.trim()) return;
+      const now = Date.now();
+      if (now - lastTyping < 1200) return;
+      lastTyping = now;
+      const r = Chat.rooms[Chat.active];
+      if (!r) return;
+      if (r.broadcast) Net.send({ t: "typing", id: Net.id, room: "darkcore" });
+      else if (Net.peers.has(r.peerId)) Net.sendTo(r.peerId, { t: "typing", id: Net.id, to: r.peerId, room: "dm" });
+    });
 
     // outgoing — really sealed per recipient and transmitted
     composer.addEventListener("submit", async (e) => {
@@ -872,6 +917,13 @@ Apps.messages = {
     // incoming — real frames from real peers
     const onMsg = async (m) => {
       if (m.system) { drawRail(); if (Chat.active === "darkcore") drawThread(); return; }
+      if (m.t === "typing") {
+        const typer = Net.peers.get(m.id);
+        if (!typer) return;
+        const roomId = m.room === "darkcore" ? "darkcore" : (Chat.ensureDM(typer), Chat.dmId(m.id));
+        noteTyping(roomId, m.id);
+        return;
+      }
       const peer = Net.peers.get(m.from);
       if (!peer || !peer.pub) return;
       let text = "(unable to open)";
@@ -879,13 +931,14 @@ Apps.messages = {
       const roomId = m.room === "darkcore" ? "darkcore" : Chat.ensureDM(peer);
       const r = Chat.rooms[roomId];
       const when = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      clearTyping(roomId, m.from);   // their message supersedes the dots
       r.msgs.push({ who: peer.name, ini: initials(peer.name), when, text, wire: m.wire });
       if (Chat.active === roomId) drawThread();
       else { r.unread++; Dock.refresh(); }
       drawRail();
     };
     const onPeers = () => { drawRail(); if (Chat.rooms[Chat.active]?.broadcast) drawThread(); };
-    this._unsub = [Net.onMsg(onMsg), Net.onPeers(onPeers)];
+    this._unsub = [Net.onMsg(onMsg), Net.onPeers(onPeers), () => clearInterval(pruneTyping)];
 
     drawRail();
     drawThread();
