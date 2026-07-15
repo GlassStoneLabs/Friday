@@ -1,5 +1,5 @@
 /* Friday — offline shell. The glass never disappears; it returns to the air. */
-const CACHE = "friday-v1";
+const CACHE = "friday-v2";   // v2 — real Boards sync, WebRTC Calls, Reed-Solomon Vault
 const SHELL = [
   ".",
   "index.html",

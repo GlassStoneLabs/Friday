@@ -58,11 +58,13 @@ window, with its own dock icon, and works offline.
 | --- | --- | --- |
 | **Mesh** | Live Dark Core graph of **actual** connected nodes — real presence, real round-trip latency, real link count | ✅ real |
 | **Messages** | `# dark-core` broadcast room + per-peer DMs; every message is **really sealed and delivered** to live peers | ✅ real |
-| **Boards** | monday-style work panes, drag cards between columns | illustrative |
-| **Calls** | Project Dark Sun voice — GSM-FR at 1200 bps, Triple Diffie-Hellman | illustrative |
-| **Vault** | Reed-Solomon shard map — lose nodes, reconstruct the file | illustrative |
+| **Boards** | monday-style panes; card add/rename/move/delete **really sync live** across tabs & devices (LWW-CRDT) and **auto-save encrypted** | ✅ real |
+| **Calls** | **Real WebRTC voice** to a live peer — your mic, SDP **sealed per-peer** (X25519), media encrypted in transit (DTLS-SRTP), no server | ✅ real |
+| **Vault** | **Real Reed-Solomon erasure coding** — seal a file, scatter it into shards, seize any few, **rebuild the exact bytes** (SHA-256 verified) | ✅ real |
 | **Ledger** | Two sets of records — editable + permanent, Merkle-chained & **really verifiable** | ✅ real crypto |
 | **Settings** | Light/Dark/Auto, accent tinting, glass diffusion, profiles | ✅ real |
+
+Boards, Calls, and Vault used to be illustrative. They aren't any more — see below.
 
 ### The mesh is real — no simulation
 
@@ -104,6 +106,39 @@ then actually transmitted over BroadcastChannel/WebRTC and opened by the
 real far end. Tap the lock on any bubble to read the ciphertext that
 went on the wire. Needs https or localhost; over plain http the ribbon
 says UNSEALED.
+
+**Boards really sync, and auto-save.** Each card is an element in a
+last-write-wins set — a genuine CRDT. Add, rename, recolor, drag, or
+delete a card and the operation is broadcast over the mesh; any node that
+has seen the same operations converges to the same board, no server and no
+ordering required. Open Friday in two tabs (or link a device) and watch an
+edit in one appear in the other. State auto-saves — **encrypted into your
+account vault** when signed in, otherwise to local storage — so it survives
+reloads and rides along on the mesh.
+
+**Calls are real WebRTC voice.** Pick a live node and call it: Friday opens
+your microphone (`getUserMedia`), and the offer/answer **SDP is sealed
+per-recipient** with the peer's X25519 key before it crosses the mesh, so
+signaling is end-to-end encrypted in transit. The audio itself travels
+WebRTC's mandatory **DTLS-SRTP**, encrypted in transit by the browser, with
+**no server in the media path**. Calls ring even with the app closed, the
+waveform is driven by the real audio amplitude, mute really disables the
+track, and a short call log **auto-saves encrypted**. (Two tabs on one
+machine will echo — use headphones, or a second device.)
+
+**The Vault really erasure-codes your files.** Drop in any file. Friday
+seals it with a fresh **AES-256-GCM** key (the read capability), then
+Reed-Solomon-codes the *ciphertext* over **GF(2⁸)** (primitive polynomial
+`0x11D`) into **10 data + 6 parity shards** — a systematic MDS code, so no
+single shard reveals anything and **any 10 of the 16 rebuild the file**.
+Click shards to seize their nodes, then reconstruct: the real decoder
+recovers the ciphertext, AES-GCM decrypts it, and the result is checked
+byte-for-byte against the original's **SHA-256** before you download it.
+Encrypt-then-shard is the Tahoe-LAFS discipline; the math here is the real
+thing, not a picture of it.
+
+All three need WebCrypto (https or localhost) for sealing; WebRTC voice and
+cross-device sync also want a secure origin. The Pages URL covers both.
 
 ## Anatomy
 

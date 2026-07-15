@@ -405,6 +405,14 @@ html[data-theme="dark"][data-wallpaper="limestone"] #wallpaper {
   display: grid; place-items: center; font-size: 8.5px; font-weight: 600;
   background: color-mix(in srgb, var(--rule) 18%, transparent);
 }
+.card .tag { cursor: pointer; }
+.card-x {
+  border: none; background: none; color: var(--muted); cursor: pointer;
+  font-size: 15px; line-height: 1; padding: 0 1px; margin-left: -2px;
+  opacity: 0; transition: opacity var(--t-hover) var(--ease), color var(--t-hover) var(--ease);
+}
+.card:hover .card-x { opacity: .45; }
+.card-x:hover { color: var(--carmine); opacity: 1; }
 .col.drag-over .col-drop { background: color-mix(in srgb, var(--accent) 9%, transparent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
 .col-drop { display: flex; flex-direction: column; gap: 9px; min-height: 60px; border: 1px dashed transparent; border-radius: 12px; transition: background var(--t-hover) var(--ease); }
 .add-card { color: var(--muted); padding: 7px 10px; border-radius: 9px; text-align: left; font-size: 12px; }
@@ -456,6 +464,8 @@ html[data-theme="dark"][data-wallpaper="limestone"] #wallpaper {
 .call-btn.go { background: #2E7D4F; }
 .call-btn.end { background: var(--carmine); }
 .call-btn.mute { background: color-mix(in srgb, var(--body) 22%, transparent); color: var(--body); }
+.call-btn.mute.on { background: var(--carmine); color: #fff; }
+.t-sub { color: var(--muted); font-size: 11.5px; line-height: 1.5; }
 
 /* ---------- vault ---------- */
 .file-row {
@@ -480,6 +490,14 @@ html[data-theme="dark"][data-wallpaper="limestone"] #wallpaper {
 .shard.healing { background: color-mix(in srgb, var(--accent) 55%, transparent); }
 .legend { display: flex; gap: 14px; margin-top: 10px; color: var(--muted); flex-wrap: wrap; }
 .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+.shard { cursor: pointer; }
+.shard:hover { outline: 1px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 1px; }
+.hex-peek { margin-top: 12px; padding: 9px 11px; border-radius: 9px; background: color-mix(in srgb, var(--body) 5%, transparent); border: 1px solid var(--pane-edge); color: var(--muted); font-size: 8.5px; line-height: 1.7; letter-spacing: .08em; word-break: break-all; }
+.vault-drop {
+  border: 1.5px dashed var(--pane-edge); border-radius: 16px; padding: 30px 26px;
+  transition: background var(--t-pane) var(--ease), border-color var(--t-pane) var(--ease);
+}
+.vault-drop.over { border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 
 /* ---------- settings & controls ---------- */
 .set-section { margin-bottom: 22px; }

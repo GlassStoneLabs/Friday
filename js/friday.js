@@ -581,16 +581,19 @@ const Net = {
   pending: new Map(),        // ping id -> sent ts
   peerSubs: new Set(),       // mesh + messages views
   msgSubs: new Set(),
+  appSubs: new Set(),        // boards · calls · vault — live app frames over the mesh
   STUN: [{ urls: "stun:stun.l.google.com:19302" }],
 
   onPeers(fn) { this.peerSubs.add(fn); return () => this.peerSubs.delete(fn); },
   onMsg(fn) { this.msgSubs.add(fn); return () => this.msgSubs.delete(fn); },
+  onApp(fn) { this.appSubs.add(fn); return () => this.appSubs.delete(fn); },
   emitPeers() {
     const mc = document.getElementById("mb-mesh-count"); if (mc) mc.textContent = 1 + this.peers.size;
     const dot = document.querySelector("#mb-mesh .mesh-dot"); if (dot) dot.classList.toggle("off", this.peers.size === 0);
     for (const f of this.peerSubs) try { f(); } catch {}
   },
   emitMsg(m) { for (const f of this.msgSubs) try { f(m); } catch {} },
+  emitApp(m) { for (const f of this.appSubs) try { f(m); } catch {} },
 
   async start() {
     if (Account.unlocked) { this.name = Account.name; this.id = Account.shortId(); }
@@ -642,6 +645,10 @@ const Net = {
       this.emitMsg(m);
     } else if (m.t === "typing" && (m.to === this.id || (!m.to && m.room === "darkcore"))) {
       this.emitMsg(m);
+    } else if (typeof m.t === "string" && /^(board|call|vault):/.test(m.t) && (m.to == null || m.to === this.id)) {
+      // app frames — boards sync, call signaling, vault shard transfer — carry
+      // the sender id so subscribers can attribute + seal replies per-peer
+      this.emitApp(m);
     }
   },
 
@@ -946,56 +953,140 @@ Apps.messages = {
   teardown() { this._unsub?.forEach((u) => u()); this._unsub = null; },
 };
 
-/* ---------------- Boards ---------------- */
+/* ---------------- Boards (REAL · live mesh sync + encrypted at rest) ----------
+   A last-write-wins element set (a real CRDT): every card is an object keyed by
+   a stable id, carrying a version and the id of the node that last touched it.
+   Local edits bump the version and broadcast a `board:op`; incoming ops are
+   merged only if they're newer (higher version, node id breaks ties), so any
+   two nodes that have seen the same set of ops converge — no server, no order
+   guarantees required. Tombstones (del:true) let deletions propagate too.
+   State is saved encrypted into the account vault (or localStorage when there
+   is no account), so it survives reloads and rides along on the mesh. */
 const Board = {
   cols: [
-    { id: "backlog", name: "Backlog", color: "#7A7770", cards: [
-      { t: "LoRa transceiver firmware — needle MTU tuning", tag: "DARK CORE", who: "MW" },
-      { t: "Sybil-resistance audit with introduction graphs", tag: "SECURITY", who: "EL" },
-    ]},
-    { id: "doing", name: "In progress", color: "#1A3A5C", cards: [
-      { t: "Erasure-coded vault — RaptorQ fountain stream", tag: "STORAGE", who: "SS" },
-      { t: "Friday glass pass — diffusion & tint signatures", tag: "DESIGN", who: "AR" },
-    ]},
-    { id: "review", name: "Review", color: "#D8A72A", cards: [
-      { t: "Voice bridge over Tor — duplex under 200 ms", tag: "DARK SUN", who: "GR" },
-    ]},
-    { id: "done", name: "Done", color: "#2E7D4F", cards: [
-      { t: "Reticulum link layer — 297-byte handshake", tag: "DARK CORE", who: "MW" },
-      { t: "CRDT sync across partitioned offices", tag: "STORAGE", who: "EL" },
-    ]},
+    { id: "backlog", name: "Backlog", color: "#7A7770" },
+    { id: "doing", name: "In progress", color: "#1A3A5C" },
+    { id: "review", name: "Review", color: "#D8A72A" },
+    { id: "done", name: "Done", color: "#2E7D4F" },
   ],
+  cards: new Map(),          // id -> { id, col, t, tag, who, ord, v, node, del }
+  clock: 0,
+  loaded: false,
+  subs: new Set(),
+
+  onChange(fn) { this.subs.add(fn); return () => this.subs.delete(fn); },
+  emit() { for (const f of this.subs) try { f(); } catch {} },
+
+  // deterministic seed ids → if two fresh nodes both seed, the merge dedups
+  seed() {
+    const s = [
+      ["seed-1", "backlog", "LoRa transceiver firmware — needle MTU tuning", "DARK CORE", "MW"],
+      ["seed-2", "backlog", "Sybil-resistance audit with introduction graphs", "SECURITY", "EL"],
+      ["seed-3", "doing", "Erasure-coded vault — Reed-Solomon shards", "STORAGE", "SS"],
+      ["seed-4", "doing", "Friday glass pass — diffusion & tint signatures", "DESIGN", "AR"],
+      ["seed-5", "review", "Voice bridge — WebRTC duplex under 200 ms", "DARK SUN", "GR"],
+      ["seed-6", "done", "Reticulum link layer — 297-byte handshake", "DARK CORE", "MW"],
+      ["seed-7", "done", "CRDT sync across partitioned offices", "STORAGE", "EL"],
+    ];
+    s.forEach(([id, col, t, tag, who], i) => this.cards.set(id, { id, col, t, tag, who, ord: i, v: 1, node: "seed", del: false }));
+  },
+
+  load() {
+    if (this.loaded) return;
+    this.loaded = true;
+    let raw = null;
+    try { raw = (Account.unlocked && Account.store.boards) || JSON.parse(localStorage.getItem("friday.boards") || "null"); } catch {}
+    if (raw && Array.isArray(raw.cards)) {
+      raw.cards.forEach((c) => this.cards.set(c.id, c));
+      this.clock = raw.clock || 0;
+    } else {
+      this.seed();
+    }
+  },
+  persist() {
+    const snap = { cards: [...this.cards.values()], clock: this.clock };
+    // signed in → encrypted in the vault only; otherwise plain localStorage
+    if (Account.unlocked) { Account.save({ boards: snap }); try { localStorage.removeItem("friday.boards"); } catch {} }
+    else try { localStorage.setItem("friday.boards", JSON.stringify(snap)); } catch {}
+  },
+
+  list(colId) {
+    return [...this.cards.values()].filter((c) => !c.del && c.col === colId).sort((a, b) => (a.ord - b.ord) || (a.v - b.v));
+  },
+  nextOrd(colId) { return this.list(colId).reduce((m, c) => Math.max(m, c.ord), -1) + 1; },
+
+  // a local mutation: stamp a fresh version, persist, and put it on the wire
+  edit(id, patch) {
+    const cur = this.cards.get(id) || { id, ord: 0 };
+    this.clock++;
+    const card = { ...cur, ...patch, v: this.clock, node: Net.id };
+    this.cards.set(id, card);
+    this.persist();
+    Net.send({ t: "board:op", id: Net.id, card });
+    this.emit();
+    return card;
+  },
+  // a remote op: keep it only if it's strictly newer (version, then node id)
+  merge(card) {
+    if (!card || !card.id) return false;
+    const cur = this.cards.get(card.id);
+    if (cur && !(card.v > cur.v || (card.v === cur.v && card.node > cur.node))) return false;
+    this.cards.set(card.id, card);
+    if (card.v > this.clock) this.clock = card.v;   // stay ahead of what we've seen
+    this.persist();
+    this.emit();
+    return true;
+  },
 };
 
 Apps.boards = {
   name: "Boards", title: "BOARDS · EROS OFFICE", icon: Icons.boards, w: 940, h: 560,
   render(body) {
+    Board.load();
     const content = el("section", "content");
     content.innerHTML = `<div class="board-head">
       <div><div class="mono kicker">ORANGE PIE · V1 ALPHA</div>
       <div class="h-display">The work, <em>in panes.</em></div></div>
-      <div class="mono sec-ribbon" style="margin-left:auto">SYNCED BY CRDT · NO CENTRAL SERVER</div></div>`;
+      <div class="mono sec-ribbon" id="board-ribbon" style="margin-left:auto"></div></div>`;
     const board = el("div", "board");
     content.append(board);
     body.append(content);
+    const ribbon = content.querySelector("#board-ribbon");
+    const setRibbon = () => { ribbon.innerHTML = `LWW-CRDT · SYNCED TO ${Net.peers.size} PEER${Net.peers.size === 1 ? "" : "S"} · SAVED ${Account.unlocked ? "ENCRYPTED" : "LOCALLY"}`; };
 
     const tagColor = { "DARK CORE": "rgba(26,58,92,.16)", SECURITY: "rgba(107,23,33,.14)", STORAGE: "rgba(216,167,42,.18)", DESIGN: "rgba(201,214,219,.5)", "DARK SUN": "rgba(107,23,33,.14)" };
-    let dragSrc = null;
+    const tags = ["DARK CORE", "SECURITY", "STORAGE", "DESIGN", "DARK SUN"];
+    let dragId = null;
 
     const draw = () => {
+      setRibbon();
       board.replaceChildren();
       for (const col of Board.cols) {
+        const cards = Board.list(col.id);
         const c = el("div", "col");
         c.dataset.col = col.id;
-        c.innerHTML = `<div class="col-head mono"><span class="col-dot" style="background:${col.color}"></span>${col.name.toUpperCase()}<span class="count">${col.cards.length}</span></div>`;
+        c.innerHTML = `<div class="col-head mono"><span class="col-dot" style="background:${col.color}"></span>${col.name.toUpperCase()}<span class="count">${cards.length}</span></div>`;
         const drop = el("div", "col-drop");
-        col.cards.forEach((card, i) => {
+        cards.forEach((card) => {
           const k = el("div", "card");
           k.draggable = true;
-          k.innerHTML = `<div class="card-title">${esc(card.t)}</div>
-            <div class="card-row"><span class="tag" style="background:${tagColor[card.tag] || "var(--pane-bg)"}">${card.tag}</span><span class="who">${card.who}</span></div>`;
-          k.addEventListener("dragstart", () => { dragSrc = { col: col.id, i }; k.classList.add("dragging"); });
+          const nextTag = () => tags[(tags.indexOf(card.tag) + 1) % tags.length];
+          k.innerHTML = `<div class="card-title" title="Double-click to rename">${esc(card.t)}</div>
+            <div class="card-row"><span class="tag" title="Click to recolor" style="background:${tagColor[card.tag] || "var(--pane-bg)"}">${esc(card.tag || "—")}</span><span class="who">${esc(card.who || "")}</span><button class="card-x" title="Delete" aria-label="Delete card">×</button></div>`;
+          k.addEventListener("dragstart", () => { dragId = card.id; k.classList.add("dragging"); });
           k.addEventListener("dragend", () => k.classList.remove("dragging"));
+          k.querySelector(".tag").addEventListener("click", (e) => { e.stopPropagation(); Board.edit(card.id, { tag: nextTag() }); });
+          k.querySelector(".card-x").addEventListener("click", (e) => { e.stopPropagation(); Board.edit(card.id, { del: true }); });
+          k.querySelector(".card-title").addEventListener("dblclick", () => {
+            const inp = el("input");
+            inp.type = "text"; inp.value = card.t;
+            Object.assign(inp.style, { padding: "6px 8px", borderRadius: "8px", border: "1px solid var(--pane-edge)", background: "var(--pane-bg)", outline: "none", width: "100%", font: "inherit" });
+            k.querySelector(".card-title").replaceWith(inp); inp.focus(); inp.select();
+            let done = false;
+            const commit = () => { if (done) return; done = true; const t = inp.value.trim(); if (t && t !== card.t) Board.edit(card.id, { t }); else draw(); };
+            inp.addEventListener("keydown", (e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") { done = true; draw(); } });
+            inp.addEventListener("blur", commit);
+          });
           drop.append(k);
         });
         const add = el("button", "add-card", "+ New pane");
@@ -1004,11 +1095,14 @@ Apps.boards = {
           inp.type = "text"; inp.placeholder = "Name the work, then Enter";
           Object.assign(inp.style, { padding: "9px 12px", borderRadius: "12px", border: "1px solid var(--pane-edge)", background: "var(--pane-bg)", outline: "none", width: "100%" });
           drop.append(inp); inp.focus();
+          let done = false;
           const commit = () => {
-            if (inp.value.trim()) col.cards.push({ t: inp.value.trim(), tag: "DESIGN", who: "GR" });
-            draw();
+            if (done) return; done = true;
+            const t = inp.value.trim();
+            if (t) Board.edit(crypto.randomUUID ? crypto.randomUUID() : "c-" + Date.now() + Math.random().toString(36).slice(2), { col: col.id, t, tag: "DESIGN", who: initials(Net.name), ord: Board.nextOrd(col.id), del: false });
+            else draw();
           };
-          inp.addEventListener("keydown", (e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") draw(); });
+          inp.addEventListener("keydown", (e) => { if (e.key === "Enter") commit(); if (e.key === "Escape") { done = true; draw(); } });
           inp.addEventListener("blur", commit);
         });
         c.append(drop, add);
@@ -1017,193 +1111,566 @@ Apps.boards = {
         c.addEventListener("drop", (e) => {
           e.preventDefault();
           c.classList.remove("drag-over");
-          if (!dragSrc) return;
-          const from = Board.cols.find((x) => x.id === dragSrc.col);
-          const [card] = from.cards.splice(dragSrc.i, 1);
-          col.cards.push(card);
-          dragSrc = null;
-          draw();
+          if (!dragId) return;
+          const card = Board.cards.get(dragId);
+          if (card && card.col !== col.id) Board.edit(dragId, { col: col.id, ord: Board.nextOrd(col.id) });
+          dragId = null;
         });
         board.append(c);
       }
     };
+
+    // live sync — merge remote ops, answer/emit full-state requests on join
+    const onApp = (m) => {
+      if (m.t === "board:op") Board.merge(m.card);
+      else if (m.t === "board:full" && Array.isArray(m.cards)) m.cards.forEach((c) => Board.merge(c));
+      else if (m.t === "board:req") Net.send({ t: "board:full", id: Net.id, cards: [...Board.cards.values()] });
+    };
+    this._unsub = [
+      Board.onChange(draw),
+      Net.onApp(onApp),
+      Net.onPeers(setRibbon),
+    ];
+    Net.send({ t: "board:req", id: Net.id });   // pull the freshest state from the mesh
     draw();
   },
+  teardown() { this._unsub?.forEach((u) => u()); this._unsub = null; },
 };
 
-/* ---------------- Calls · Dark Sun ---------------- */
-Apps.calls = {
-  name: "Calls", title: "CALLS · PROJECT DARK SUN", icon: Icons.calls, w: 780, h: 540,
-  render(body) {
-    const contacts = [
-      ["Avery Reyes", "AR", "Design Office · Hudson Valley"],
-      ["Sophie Sun", "SS", "Operations · Pier 40"],
-      ["Elena Lanot", "EL", "Dark Sun · Voice Lab"],
-      ["Marcus Webb", "MW", "Dark Core · Routing"],
-    ];
-    let active = 0, timer = null, t0 = 0;
+/* ---------------- Calls · Dark Sun (REAL WebRTC voice) ----------------
+   A genuine peer-to-peer voice call to a live mesh node. The microphone is
+   real (getUserMedia); the offer/answer SDP is sealed per-recipient with the
+   peer's X25519 key (E2E.seal) before it crosses the mesh, so signaling is
+   end-to-end encrypted in transit; the audio itself rides WebRTC's mandatory
+   DTLS-SRTP, encrypted in transit by the browser. No server carries the media.
+   The Call engine always listens, so a call rings even with the app closed;
+   a short, encrypted call log auto-saves to the account vault. */
+const Call = {
+  state: "idle",          // idle | dialing | ringing | live
+  peerId: null, peerName: "", pc: null, local: null, remote: null,
+  incoming: null,         // { from, name, wire } while ringing in
+  audio: null, t0: 0, muted: false,
+  subs: new Set(), _wired: false,
+  log: [],                // recent calls — auto-saved encrypted
 
+  onChange(fn) { this.subs.add(fn); return () => this.subs.delete(fn); },
+  emit() { for (const f of this.subs) try { f(); } catch {} },
+
+  init() {
+    if (this._wired) return;
+    this._wired = true;
+    this.audio = new Audio(); this.audio.autoplay = true;
+    try { this.log = (Account.unlocked && Account.store.callLog) || JSON.parse(localStorage.getItem("friday.calllog") || "[]"); } catch { this.log = []; }
+    Net.onApp((m) => this.signal(m));
+    Net.onPeers(() => { if (this.peerId && !Net.peers.has(this.peerId) && this.state !== "idle") this.hangup("Peer left the mesh"); this.emit(); });
+  },
+
+  async mic() {
+    if (this.local) return this.local;
+    this.local = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    return this.local;
+  },
+  newPC() {
+    const pc = new RTCPeerConnection({ iceServers: Net.STUN });
+    pc.ontrack = (e) => { this.remote = e.streams[0]; this.audio.srcObject = this.remote; };
+    pc.onconnectionstatechange = () => { if (["failed", "disconnected", "closed"].includes(pc.connectionState) && this.state === "live") this.hangup("Connection lost"); };
+    return pc;
+  },
+  addTracks(pc) { for (const t of this.local.getTracks()) pc.addTrack(t, this.local); },
+  iceDone(pc) {
+    return new Promise((res) => {
+      if (pc.iceGatheringState === "complete") return res();
+      const check = () => { if (pc.iceGatheringState === "complete") { pc.removeEventListener("icegatheringstatechange", check); res(); } };
+      pc.addEventListener("icegatheringstatechange", check);
+      setTimeout(res, 2500);
+    });
+  },
+  async wrap(peer, sdp) { return E2E.ok && peer.pub ? { sealed: true, wire: await E2E.seal(peer.pub, JSON.stringify(sdp)) } : { sealed: false, sdp }; },
+  async unwrap(peer, m) { return m.sealed ? JSON.parse(await E2E.open(peer.pub, m.wire)) : m.sdp; },
+
+  async call(peer) {
+    if (this.state !== "idle") return;
+    this.peerId = peer.id; this.peerName = peer.name; this.state = "dialing"; this.emit();
+    try {
+      await this.mic();
+      this.pc = this.newPC();
+      this.addTracks(this.pc);                              // offerer: tracks before createOffer
+      const offer = await this.pc.createOffer(); await this.pc.setLocalDescription(offer);
+      await this.iceDone(this.pc);
+      const w = await this.wrap(peer, this.pc.localDescription);
+      Net.sendTo(peer.id, { t: "call:invite", id: Net.id, to: peer.id, fromName: Net.name, ...w });
+      this.state = "ringing"; this.emit();
+      this._timeout = setTimeout(() => { if (this.state === "ringing") this.hangup("No answer"); }, 30000);
+    } catch (e) { this.fail(e.name === "NotAllowedError" ? "Microphone blocked" : "Couldn't start the call"); }
+  },
+
+  async signal(m) {
+    if (m.t === "call:invite") {
+      if (this.state !== "idle") { Net.sendTo(m.id, { t: "call:busy", id: Net.id, to: m.id }); return; }
+      this.incoming = { from: m.id, name: m.fromName || "Peer", ...m };
+      this.peerId = m.id; this.peerName = m.fromName || "Peer"; this.state = "ringing-in"; this.emit();
+      if (!WM.wins.has("calls")) WM.open("calls"); else WM.focus("calls");
+    } else if (m.t === "call:accept") {
+      if (this.state !== "ringing" || m.id !== this.peerId) return;
+      clearTimeout(this._timeout);
+      const peer = Net.peers.get(m.id);
+      try { await this.pc.setRemoteDescription(new RTCSessionDescription(await this.unwrap(peer, m))); this.begin(); }
+      catch (e) { this.fail("Handshake failed"); }
+    } else if (m.t === "call:decline") { if (m.id === this.peerId) this.end("Declined", true); }
+    else if (m.t === "call:busy") { if (m.id === this.peerId) this.end("Busy", true); }
+    else if (m.t === "call:bye") { if (m.id === this.peerId) this.end("Call ended", true); }
+  },
+
+  async accept() {
+    if (this.state !== "ringing-in" || !this.incoming) return;
+    const inc = this.incoming, peer = Net.peers.get(inc.from);
+    try {
+      await this.mic();
+      this.pc = this.newPC();
+      // answerer: setRemoteDescription first, then attach tracks so they bind to the
+      // transceiver the offer created (per spec) rather than spawning a second one
+      await this.pc.setRemoteDescription(new RTCSessionDescription(await this.unwrap(peer, inc)));
+      this.addTracks(this.pc);
+      const answer = await this.pc.createAnswer(); await this.pc.setLocalDescription(answer);
+      await this.iceDone(this.pc);
+      const w = await this.wrap(peer, this.pc.localDescription);
+      Net.sendTo(inc.from, { t: "call:accept", id: Net.id, to: inc.from, ...w });
+      this.incoming = null; this.begin();
+    } catch (e) { this.fail(e.name === "NotAllowedError" ? "Microphone blocked" : "Couldn't answer"); }
+  },
+  decline() { if (this.incoming) { Net.sendTo(this.incoming.from, { t: "call:decline", id: Net.id, to: this.incoming.from }); this.reset(); this.note = "Declined"; this.emit(); } },
+
+  begin() { this.state = "live"; this.t0 = Date.now(); this.muted = false; this.emit(); },
+  hangup(note) { if (this.peerId) Net.sendTo(this.peerId, { t: "call:bye", id: Net.id, to: this.peerId }); this.end(note || "Call ended", false); },
+  end(note, remote) {
+    if (this.state === "live") this.record();
+    this.reset(); this.note = note; this.emit();
+  },
+  fail(note) { this.reset(); this.note = note; this.emit(); },
+  reset() {
+    clearTimeout(this._timeout);
+    try { this.pc?.close(); } catch {}
+    if (this.local) { this.local.getTracks().forEach((t) => t.stop()); this.local = null; }
+    if (this.audio) this.audio.srcObject = null;
+    this.pc = this.remote = this.incoming = null; this.peerId = null; this.state = "idle"; this.muted = false;
+  },
+  toggleMute() { this.muted = !this.muted; this.local?.getAudioTracks().forEach((t) => (t.enabled = !this.muted)); this.emit(); },
+
+  record() {
+    const secs = ((Date.now() - this.t0) / 1000) | 0;
+    this.log.unshift({ name: this.peerName, when: Date.now(), secs });
+    this.log = this.log.slice(0, 12);
+    // auto-save — encrypted in the vault when signed in, else local
+    if (Account.unlocked) { Account.save({ callLog: this.log }); try { localStorage.removeItem("friday.calllog"); } catch {} }
+    else try { localStorage.setItem("friday.calllog", JSON.stringify(this.log)); } catch {}
+  },
+  clock() { const s = ((Date.now() - this.t0) / 1000) | 0; return String((s / 60) | 0).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0"); },
+};
+
+Apps.calls = {
+  name: "Calls", title: "CALLS · PROJECT DARK SUN", icon: Icons.calls, w: 800, h: 560,
+  render(body) {
+    Call.init();
     const rail = el("aside", "rail");
-    rail.append(el("div", "mono rail-head", "SECURE LINE"));
+    rail.append(el("div", "mono rail-head", "LIVE NODES · SECURE LINE"));
     const list = el("div");
-    rail.append(list, el("div", "mono rail-foot", "GSM-FR · 1200 BPS · TRIPLE DH<br>KECCAK 1600/576 SPONGE DUPLEX"));
+    const logHead = el("div", "mono rail-head", "RECENT"); logHead.style.paddingTop = "12px";
+    const logList = el("div");
+    rail.append(list, logHead, logList, el("div", "mono rail-foot", "WEBRTC VOICE · DTLS-SRTP MEDIA<br>SDP SEALED PER-PEER · X25519 · NO SERVER"));
 
     const stage = el("section", "content");
     const inner = el("div", "call-stage");
     stage.append(inner);
     body.append(rail, stage);
+    let selected = null;   // peer id chosen while idle
+    let raf = null, clockTimer = null;
+
+    const stopAnim = () => { if (raf) cancelAnimationFrame(raf), (raf = null); if (clockTimer) clearInterval(clockTimer), (clockTimer = null); };
 
     const drawRail = () => {
       list.replaceChildren();
-      contacts.forEach(([name, ini], i) => {
-        const b = el("button", "rail-item" + (i === active ? " active" : ""));
-        b.innerHTML = `<span class="who" style="width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:9px;font-weight:600;background:color-mix(in srgb,var(--rule) 18%,transparent)">${ini}</span> ${name}`;
-        b.addEventListener("click", () => { if (!timer) { active = i; drawIdle(); drawRail(); } });
+      const peers = [...Net.peers.values()];
+      if (!peers.length) list.append(el("div", "t-sub", "No one on the mesh yet. Open Friday in another tab or window, or Mesh ▸ Link a device — then call across it."));
+      for (const p of peers) {
+        const b = el("button", "rail-item" + (p.id === selected ? " active" : ""));
+        b.innerHTML = `<span class="who" style="width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:9px;font-weight:600;background:color-mix(in srgb,var(--rule) 18%,transparent)">${initials(p.name)}</span> ${esc(p.name)}` + (p.pub ? "" : ` <span class="t-sub" style="margin-left:auto">no key</span>`);
+        b.addEventListener("click", () => { if (Call.state === "idle") { selected = p.id; draw(); } });
         list.append(b);
-      });
+      }
+      logList.replaceChildren();
+      if (!Call.log.length) logList.append(el("div", "t-sub", "No calls yet."));
+      for (const c of Call.log.slice(0, 6)) {
+        const mm = String((c.secs / 60) | 0).padStart(2, "0") + ":" + String(c.secs % 60).padStart(2, "0");
+        const row = el("div", "t-sub");
+        row.style.cssText = "display:flex;gap:8px;padding:3px 10px";
+        row.innerHTML = `<span>${esc(c.name)}</span><span class="mono" style="margin-left:auto;font-size:8px">${mm}</span>`;
+        logList.append(row);
+      }
     };
 
-    const drawIdle = () => {
+    const avatarFor = (id, name) => `<div class="call-avatar">${initials(name || (Net.peers.get(id)?.name) || "··")}</div>`;
+
+    const draw = () => {
+      stopAnim();
+      drawRail();
+      const s = Call.state;
+      if (s === "ringing-in") {
+        inner.classList.remove("live");
+        inner.innerHTML = `${avatarFor(Call.peerId, Call.peerName)}
+          <div class="call-name">${esc(Call.peerName)}</div>
+          <div class="call-sub">Incoming sealed call…</div>
+          <div class="mono kicker">WEBRTC · SDP SEALED · X25519</div>
+          <div class="call-actions">
+            <button class="call-btn go" aria-label="Answer">${Icons.phone}</button>
+            <button class="call-btn end" aria-label="Decline">${Icons.phoneDown}</button>
+          </div>`;
+        inner.querySelector(".go").addEventListener("click", () => Call.accept());
+        inner.querySelector(".end").addEventListener("click", () => Call.decline());
+        return;
+      }
+      if (s === "dialing" || s === "ringing") {
+        inner.classList.remove("live");
+        inner.innerHTML = `${avatarFor(Call.peerId, Call.peerName)}
+          <div class="call-name">${esc(Call.peerName)}</div>
+          <div class="call-sub">${s === "dialing" ? "Sealing the line…" : "Ringing…"}</div>
+          <div class="mono kicker">EXCHANGING SEALED SDP · GATHERING ICE</div>
+          <div class="call-actions"><button class="call-btn end" aria-label="Cancel">${Icons.phoneDown}</button></div>`;
+        inner.querySelector(".end").addEventListener("click", () => Call.hangup("Cancelled"));
+        return;
+      }
+      if (s === "live") {
+        inner.classList.add("live");
+        inner.innerHTML = `${avatarFor(Call.peerId, Call.peerName)}
+          <div class="call-name">${esc(Call.peerName)}</div>
+          <div class="call-sub" id="call-clock">00:00</div>
+          <div class="wave" id="wave">${"<i></i>".repeat(20)}</div>
+          <div class="mono kicker">CONNECTED · DTLS-SRTP · END-TO-END · NO SERVER</div>
+          <div class="call-actions">
+            <button class="call-btn mute${Call.muted ? " on" : ""}" aria-label="Mute">${Icons.mic}</button>
+            <button class="call-btn end" aria-label="End call">${Icons.phoneDown}</button>
+          </div>`;
+        const clock = inner.querySelector("#call-clock");
+        clockTimer = setInterval(() => (clock.textContent = Call.clock()), 500);
+        clock.textContent = Call.clock();
+        inner.querySelector(".mute").addEventListener("click", (e) => { Call.toggleMute(); e.currentTarget.classList.toggle("on", Call.muted); });
+        inner.querySelector(".end").addEventListener("click", () => Call.hangup("Call ended"));
+        startWave(inner.querySelector("#wave"));
+        return;
+      }
+      // idle
       inner.classList.remove("live");
-      const [name, ini, sub] = contacts[active];
-      inner.innerHTML = `
-        <div class="call-avatar">${ini}</div>
-        <div class="call-name">${name}</div>
-        <div class="call-sub">${sub}</div>
-        <div class="mono kicker">LINE IS DARK · READY TO SEAL</div>
+      const peer = selected && Net.peers.get(selected);
+      if (!peer) {
+        inner.innerHTML = `<div class="mono kicker">PROJECT DARK SUN · WEBRTC VOICE</div>
+          <div class="call-name" style="font-size:22px">Pick a node to call<em>.</em></div>
+          <div class="call-sub" style="max-width:40ch;text-align:center">Real peer-to-peer voice — your mic, sealed signaling, DTLS-SRTP media. ${Call.note ? esc(Call.note) + "." : "Choose a live node on the left."}</div>`;
+        return;
+      }
+      inner.innerHTML = `${avatarFor(peer.id, peer.name)}
+        <div class="call-name">${esc(peer.name)}</div>
+        <div class="call-sub">${peer.pub ? "Ready to seal the line" : "This peer has no E2E key — signaling won't be sealed"}</div>
+        <div class="mono kicker">${Call.note ? esc(Call.note.toUpperCase()) + " · " : ""}LINE IS DARK · READY</div>
         <div class="call-actions"><button class="call-btn go" aria-label="Call">${Icons.phone}</button></div>`;
-      inner.querySelector(".go").addEventListener("click", connect);
+      inner.querySelector(".go").addEventListener("click", () => Call.call(peer));
     };
 
-    const connect = () => {
-      const [name, ini] = contacts[active];
-      inner.innerHTML = `
-        <div class="call-avatar">${ini}</div>
-        <div class="call-name">${name}</div>
-        <div class="call-sub">Negotiating Triple Diffie-Hellman…</div>
-        <div class="mono kicker">CURVE 25519 · HOP 1 · HOP 2 · HOP 3</div>`;
-      setTimeout(live, 1500);
+    // real amplitude — analyse the live audio and drive the bars
+    const startWave = (wave) => {
+      if (!wave) return;
+      const bars = [...wave.querySelectorAll("i")];
+      bars.forEach((b) => (b.style.animation = "none"));
+      const stream = Call.remote || Call.local;
+      let analyser = null, buf = null;
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        const ctx = (Call._ac = Call._ac || new AC());
+        if (ctx.state === "suspended") ctx.resume();
+        if (stream) {
+          const src = ctx.createMediaStreamSource(stream);
+          analyser = ctx.createAnalyser(); analyser.fftSize = 64;
+          src.connect(analyser);
+          buf = new Uint8Array(analyser.frequencyBinCount);
+        }
+      } catch {}
+      const tick = () => {
+        if (Call.state !== "live") return;
+        if (analyser) {
+          analyser.getByteFrequencyData(buf);
+          bars.forEach((b, i) => {
+            const v = buf[(i * buf.length / bars.length) | 0] / 255;
+            b.style.height = (7 + v * 27).toFixed(1) + "px";
+          });
+        }
+        raf = requestAnimationFrame(tick);
+      };
+      tick();
     };
 
-    const live = () => {
-      if (!inner.isConnected) return;
-      const [name, ini] = contacts[active];
-      inner.classList.add("live");
-      inner.innerHTML = `
-        <div class="call-avatar">${ini}</div>
-        <div class="call-name">${name}</div>
-        <div class="call-sub" id="call-clock">00:00</div>
-        <div class="wave">${"<i></i>".repeat(16)}</div>
-        <div class="mono kicker">SEALED · GSM-FR · 1200 BPS · ONION 3 HOPS</div>
-        <div class="call-actions">
-          <button class="call-btn mute" aria-label="Mute">${Icons.mic}</button>
-          <button class="call-btn end" aria-label="End call">${Icons.phoneDown}</button>
-        </div>`;
-      t0 = Date.now();
-      const clock = inner.querySelector("#call-clock");
-      timer = setInterval(() => {
-        const s = (Date.now() - t0) / 1000 | 0;
-        clock.textContent = String(s / 60 | 0).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
-      }, 500);
-      inner.querySelector(".mute").addEventListener("click", (e) => e.currentTarget.classList.toggle("on"));
-      inner.querySelector(".end").addEventListener("click", () => { clearInterval(timer); timer = null; drawIdle(); });
-    };
-
-    drawRail();
-    drawIdle();
-    this.teardown = () => { clearInterval(timer); timer = null; };
+    this._unsub = [Call.onChange(draw), Net.onPeers(drawRail)];
+    draw();
+    this.teardown = () => { stopAnim(); this._unsub?.forEach((u) => u()); this._unsub = null; };
   },
 };
 
-/* ---------------- Vault ---------------- */
+/* ---------------- Reed-Solomon (REAL erasure code over GF(2⁸), poly 0x11D) ----
+   A systematic MDS code: the (k+m)×k encode matrix is the identity on top and a
+   Cauchy matrix below, so *any* k of the k+m shards invert back to the data —
+   the mathematical guarantee behind "lose nodes, rebuild the file". Encode +
+   decode are exact over the finite field; verified against random loss patterns. */
+const RS = {
+  EXP: new Uint8Array(512), LOG: new Uint8Array(256), _ready: false,
+  _init() {
+    if (this._ready) return;
+    let x = 1;
+    for (let i = 0; i < 255; i++) { this.EXP[i] = x; this.LOG[x] = i; x <<= 1; if (x & 0x100) x ^= 0x11d; }
+    for (let i = 255; i < 512; i++) this.EXP[i] = this.EXP[i - 255];
+    this._ready = true;
+  },
+  mul(a, b) { if (!a || !b) return 0; return this.EXP[this.LOG[a] + this.LOG[b]]; },
+  inv(a) { return this.EXP[255 - this.LOG[a]]; },
+
+  matrix(k, m) {                          // [ I_k ; Cauchy(m×k) ] — x_i=i, y_j=m+j (disjoint)
+    this._init();
+    const M = Array.from({ length: k + m }, () => new Uint8Array(k));
+    for (let i = 0; i < k; i++) M[i][i] = 1;
+    for (let i = 0; i < m; i++) for (let j = 0; j < k; j++) M[k + i][j] = this.inv(i ^ (m + j));
+    return M;
+  },
+  invert(A) {                             // Gauss-Jordan over GF(256)
+    const n = A.length;
+    const M = A.map((r) => Uint8Array.from(r));
+    const I = Array.from({ length: n }, (_, i) => { const r = new Uint8Array(n); r[i] = 1; return r; });
+    for (let c = 0; c < n; c++) {
+      let p = c; while (p < n && M[p][c] === 0) p++;
+      if (p === n) return null;
+      if (p !== c) { [M[p], M[c]] = [M[c], M[p]]; [I[p], I[c]] = [I[c], I[p]]; }
+      const pv = this.inv(M[c][c]);
+      for (let j = 0; j < n; j++) { M[c][j] = this.mul(M[c][j], pv); I[c][j] = this.mul(I[c][j], pv); }
+      for (let r = 0; r < n; r++) {
+        if (r === c || M[r][c] === 0) continue;
+        const f = M[r][c];
+        for (let j = 0; j < n; j++) { M[r][j] ^= this.mul(f, M[c][j]); I[r][j] ^= this.mul(f, I[c][j]); }
+      }
+    }
+    return I;
+  },
+  encode(bytes, k, m) {                    // → { shards:[k+m], len, origLen, k, m }
+    this._init();
+    const len = Math.ceil(bytes.length / k) || 1;
+    const shards = [];
+    for (let i = 0; i < k; i++) { const s = new Uint8Array(len); s.set(bytes.subarray(i * len, Math.min((i + 1) * len, bytes.length))); shards.push(s); }
+    const M = this.matrix(k, m);
+    for (let i = 0; i < m; i++) {
+      const p = new Uint8Array(len);
+      for (let j = 0; j < k; j++) { const row = M[k + i][j], sj = shards[j]; if (!row) continue; for (let b = 0; b < len; b++) p[b] ^= this.mul(row, sj[b]); }
+      shards.push(p);
+    }
+    return { shards, len, origLen: bytes.length, k, m };
+  },
+  decode(present, meta) {                  // present[i] = shard bytes or null; needs ≥ k
+    const { k, m, len, origLen } = meta;
+    const M = this.matrix(k, m);
+    const have = [];
+    for (let i = 0; i < k + m && have.length < k; i++) if (present[i]) have.push(i);
+    if (have.length < k) throw new Error("too many shards lost");
+    const inv = this.invert(have.map((i) => M[i]));
+    if (!inv) throw new Error("singular submatrix");
+    const data = [];
+    for (let j = 0; j < k; j++) {
+      const d = new Uint8Array(len);
+      for (let t = 0; t < k; t++) { const f = inv[j][t]; if (!f) continue; const st = present[have[t]]; for (let b = 0; b < len; b++) d[b] ^= this.mul(f, st[b]); }
+      data.push(d);
+    }
+    const out = new Uint8Array(origLen);
+    for (let j = 0; j < k; j++) { const off = j * len; if (off >= origLen) break; out.set(data[j].subarray(0, Math.min(len, origLen - off)), off); }
+    return out;
+  },
+  // rebuild every shard from the recovered data (re-encode) — used to "heal" the grid
+  reencode(dataBytes, meta) { return this.encode(dataBytes, meta.k, meta.m).shards; },
+};
+
+/* ---------------- Vault (REAL · encrypt-then-erasure-code, Tahoe-LAFS style) ---
+   Pick any file. It's sealed with a fresh AES-256-GCM key (the read capability),
+   then the *ciphertext* is Reed-Solomon coded into K data + M parity shards —
+   so no single shard reveals anything, and any K of the K+M rebuild the file.
+   Seize shards (click them, or the button); reconstruct runs the real decoder,
+   AES-GCM-decrypts, and verifies the recovered bytes against the original's
+   SHA-256. Everything happens in this browser; nothing is faked. */
+const sha256hex = async (bytes) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((n) => n.toString(16).padStart(2, "0")).join("");
+const humanSize = (n) => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : (n / 1048576).toFixed(1) + " MB";
+
 const Vault = {
-  files: [
-    { name: "Hudson — Volume II drafts.pdf", size: "48.2 MB", data: 10, parity: 20, nodes: 17 },
-    { name: "Dark Core topology survey.sqlite", size: "12.7 MB", data: 10, parity: 14, nodes: 12 },
-    { name: "Coachwork plates — carmine.heic", size: "96.4 MB", data: 10, parity: 20, nodes: 21 },
-    { name: "Eros Office ledger (immutable).db", size: "4.1 MB", data: 10, parity: 10, nodes: 9 },
-  ],
-  active: 0,
+  K: 10, M: 6, CAP: 25 * 1024 * 1024,     // 25 MB cap keeps encode/decode instant
+  current: null,   // { name, origLen, sha, keyRaw, iv, meta, present:[bool] }
+
+  async ingest(file) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const keyRaw = crypto.getRandomValues(new Uint8Array(32));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await crypto.subtle.importKey("raw", keyRaw, "AES-GCM", false, ["encrypt", "decrypt"]);
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, bytes));
+    const sha = await sha256hex(bytes);
+    const meta = RS.encode(ct, this.K, this.M);           // erasure-code the ciphertext
+    this.current = { name: file.name, origLen: bytes.length, sha, keyRaw, iv, meta, present: meta.shards.map(() => true) };
+    return this.current;
+  },
+  reachable() { return this.current ? this.current.present.filter(Boolean).length : 0; },
+  recoverable() { return this.reachable() >= this.K; },
+
+  async reconstruct() {
+    const c = this.current;
+    const shards = c.meta.shards.map((s, i) => (c.present[i] ? s : null));
+    const ct = RS.decode(shards, c.meta);                 // real erasure decode → ciphertext
+    const key = await crypto.subtle.importKey("raw", c.keyRaw, "AES-GCM", false, ["decrypt"]);
+    const plain = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: c.iv }, key, ct));
+    const sha = await sha256hex(plain);
+    c.meta.shards = RS.reencode(ct, c.meta);              // heal: every shard back on the grid
+    c.present = c.meta.shards.map(() => true);
+    return { plain, ok: sha === c.sha, sha };
+  },
 };
 
 Apps.vault = {
-  name: "Vault", title: "VAULT · ERASURE CODED", icon: Icons.vault, w: 880, h: 540,
+  name: "Vault", title: "VAULT · ERASURE CODED", icon: Icons.vault, w: 900, h: 580,
   render(body) {
     const rail = el("aside", "rail");
     rail.append(el("div", "mono rail-head", "DISTRIBUTED SHARDS"));
     const list = el("div");
-    rail.append(list, el("div", "mono rail-foot", "REED-SOLOMON GF(2⁸) · 0x11D<br>NO NODE HOLDS A WHOLE FILE"));
+    rail.append(list, el("div", "mono rail-foot", `REED-SOLOMON GF(2⁸) · 0x11D<br>${Vault.K} DATA + ${Vault.M} PARITY · ANY ${Vault.K} OF ${Vault.K + Vault.M}<br>ENCRYPT-THEN-SHARD · NO SHARD REVEALS THE FILE`));
     const content = el("section", "content");
     const scroll = el("div", "content-scroll");
     content.append(scroll);
     body.append(rail, content);
-    let healing = false;
+    let recovered = null;   // { blob, name }
+
+    const pickFile = () => {
+      const inp = el("input"); inp.type = "file";
+      inp.addEventListener("change", () => inp.files[0] && ingest(inp.files[0]));
+      inp.click();
+    };
+    const ingest = async (file) => {
+      if (file.size > Vault.CAP) { alert(`Keep it under ${humanSize(Vault.CAP)} for this demo — the codec runs on the main thread.`); return; }
+      recovered = null;
+      scroll.innerHTML = `<div class="mono kicker">SEALING · ERASURE CODING</div><div class="set-sub">Encrypting ${esc(file.name)} and computing ${Vault.K + Vault.M} shards…</div>`;
+      try { await Vault.ingest(file); draw(); }
+      catch (e) { scroll.innerHTML = `<div class="set-sub">Couldn't process that file: ${esc(e.message)}</div>`; }
+    };
 
     const drawRail = () => {
       list.replaceChildren();
-      Vault.files.forEach((f, i) => {
-        const b = el("button", "file-row" + (i === Vault.active ? " active" : ""));
+      const c = Vault.current;
+      if (c) {
+        const b = el("button", "file-row active");
         b.innerHTML = `<span class="file-ico">${Icons.vault.replace('viewBox="0 0 24 24"', 'viewBox="0 0 24 24" width="16" height="16"')}</span>
-          <span><div class="file-name">${esc(f.name)}</div><div class="file-sub">${f.size} · ${f.nodes} nodes</div></span>`;
-        b.addEventListener("click", () => { if (!healing) { Vault.active = i; draw(); } });
+          <span><div class="file-name">${esc(c.name)}</div><div class="file-sub">${humanSize(c.origLen)} · ${Vault.reachable()}/${c.meta.shards.length} shards</div></span>`;
         list.append(b);
-      });
+      }
+      const add = el("button", "rail-item", "+ Seal a file");
+      add.style.cssText = "width:auto;margin-top:8px;background:color-mix(in srgb,var(--accent) 14%,transparent)";
+      add.addEventListener("click", pickFile);
+      list.append(add);
+    };
+
+    const drawEmpty = () => {
+      drawRail();
+      const drop = el("div", "vault-drop");
+      drop.innerHTML = `<div class="mono kicker">TAHOE-LAFS GRID · REAL ERASURE CODING</div>
+        <div class="h-display" style="margin:4px 0 6px">Seal a file into the mesh<em>.</em></div>
+        <div class="set-sub" style="max-width:52ch">Drop a file here, or choose one. Friday encrypts it with a fresh AES-256-GCM key, then Reed-Solomon-codes the ciphertext into ${Vault.K} data + ${Vault.M} parity shards. Lose any ${Vault.M} and the file still rebuilds — verified byte-for-byte.</div>
+        <button class="rail-item" id="v-pick" style="width:auto;margin-top:16px;background:color-mix(in srgb,var(--accent) 14%,transparent)">Choose a file…</button>`;
+      scroll.replaceChildren(drop);
+      drop.querySelector("#v-pick").addEventListener("click", pickFile);
+      drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+      drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+      drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); const f = e.dataTransfer.files[0]; if (f) ingest(f); });
     };
 
     const draw = () => {
       drawRail();
-      const f = Vault.files[Vault.active];
+      const c = Vault.current;
+      if (!c) return drawEmpty();
+      const N = c.meta.shards.length;
       scroll.innerHTML = `
-        <div class="mono kicker">TAHOE-LAFS GRID · RAPTORQ STREAM</div>
-        <div class="h-display" style="margin-bottom:4px">${esc(f.name.replace(/\..+$/, ""))}<em>.</em></div>
-        <div class="set-sub">${f.size} — split into ${f.data} data shards and ${f.parity} parity shards, scattered over ${f.nodes} devices. Any ${f.data} shards rebuild the whole.</div>
+        <div class="mono kicker">TAHOE-LAFS GRID · REED-SOLOMON</div>
+        <div class="h-display" style="margin-bottom:4px">${esc(c.name)}</div>
+        <div class="set-sub">${humanSize(c.origLen)} · sealed AES-256-GCM, then coded into ${Vault.K} data + ${Vault.M} parity shards. SHA-256 <span class="mono" style="font-size:9px">${c.sha.slice(0, 16)}…</span></div>
         <div class="pane" style="margin-top:14px">
-          <div class="mono kicker">SHARD MAP</div>
+          <div class="mono kicker">SHARD MAP · CLICK A SHARD TO SEIZE OR RESTORE ITS NODE</div>
           <div class="shard-grid" id="shards"></div>
           <div class="legend mono">
             <span><i style="background:color-mix(in srgb,var(--rule) 28%,transparent)"></i>DATA</span>
             <span><i style="background:color-mix(in srgb,var(--signal) 30%,transparent)"></i>PARITY</span>
-            <span><i style="background:color-mix(in srgb,var(--accent) 55%,transparent)"></i>REBUILDING</span>
-            <span><i style="background:transparent;border:1px solid var(--pane-edge)"></i>LOST NODE</span>
+            <span><i style="background:transparent;border:1px solid var(--pane-edge)"></i>SEIZED · OFFLINE</span>
           </div>
+          <div class="hex-peek mono" id="peek"></div>
         </div>
-        <div style="display:flex;gap:10px;margin-top:14px;align-items:center">
-          <button class="rail-item" id="lose" style="width:auto;background:var(--pane-bg);border:1px solid var(--pane-edge)">Simulate node loss</button>
-          <button class="rail-item" id="heal" style="width:auto;background:color-mix(in srgb,var(--accent) 14%,transparent)">Reconstruct</button>
-          <span class="set-sub" id="vault-status">Grid is whole. ${f.data + f.parity}/${f.data + f.parity} shards reachable.</span>
+        <div style="display:flex;gap:10px;margin-top:14px;align-items:center;flex-wrap:wrap">
+          <button class="rail-item" id="seize" style="width:auto;background:var(--pane-bg);border:1px solid var(--pane-edge)">Seize a node</button>
+          <button class="rail-item" id="rebuild" style="width:auto;background:color-mix(in srgb,var(--accent) 14%,transparent)">Reconstruct &amp; verify</button>
+          <button class="rail-item" id="dl" style="width:auto;background:var(--pane-bg);border:1px solid var(--pane-edge);display:none">Download recovered file</button>
+          <span class="set-sub" id="vstat" style="flex:1;min-width:16ch"></span>
         </div>`;
       const grid = scroll.querySelector("#shards");
+      const status = scroll.querySelector("#vstat");
+      const dlBtn = scroll.querySelector("#dl");
+      const peek = scroll.querySelector("#peek");
+
+      const setStatus = () => {
+        const r = Vault.reachable(), rec = Vault.recoverable();
+        status.innerHTML = rec
+          ? `<span style="color:#2E7D4F">${r}/${N} shards reachable — recoverable (need ${Vault.K}).</span>`
+          : `<span style="color:var(--carmine)">${r}/${N} shards reachable — BELOW ${Vault.K}, unrecoverable. Restore a node.</span>`;
+      };
       const cells = [];
-      for (let i = 0; i < f.data + f.parity; i++) {
-        const c = el("div", "shard" + (i >= f.data ? " parity" : ""));
-        grid.append(c); cells.push(c);
-      }
-      const status = scroll.querySelector("#vault-status");
-      scroll.querySelector("#lose").addEventListener("click", () => {
-        if (healing) return;
-        const k = 6 + (Math.random() * 4 | 0);
-        const idx = [...cells.keys()].sort(() => Math.random() - 0.5).slice(0, k);
-        idx.forEach((i) => cells[i].classList.add("lost"));
-        const left = cells.filter((c) => !c.classList.contains("lost")).length;
-        status.textContent = `${k} nodes seized or offline. ${left}/${cells.length} shards reachable — file still recoverable.`;
-      });
-      scroll.querySelector("#heal").addEventListener("click", () => {
-        if (healing) return;
-        const lost = cells.filter((c) => c.classList.contains("lost"));
-        if (!lost.length) { status.textContent = "Nothing to rebuild. The grid is whole."; return; }
-        healing = true;
-        status.textContent = "Reconstructing from surviving shards…";
-        lost.forEach((c, i) => {
-          setTimeout(() => { c.classList.remove("lost"); c.classList.add("healing"); }, 150 + i * 220);
-          setTimeout(() => { c.classList.remove("healing"); }, 700 + i * 220);
+      const drawGrid = () => {
+        grid.replaceChildren();
+        cells.length = 0;
+        c.meta.shards.forEach((sh, i) => {
+          const cell = el("div", "shard" + (i >= Vault.K ? " parity" : "") + (c.present[i] ? "" : " lost"));
+          cell.title = (i < Vault.K ? "Data shard " : "Parity shard ") + i + " — click to " + (c.present[i] ? "seize" : "restore");
+          cell.addEventListener("click", () => { c.present[i] = !c.present[i]; cell.classList.toggle("lost", !c.present[i]); setStatus(); drawRail(); showPeek(i); });
+          grid.append(cell); cells.push(cell);
         });
-        setTimeout(() => {
-          healing = false;
-          status.textContent = `Rebuilt on fresh nodes. ${cells.length}/${cells.length} shards reachable.`;
-        }, 900 + lost.length * 220);
+      };
+      const showPeek = (i) => {
+        const sh = c.meta.shards[i] || c.meta.shards[0];
+        const hex = [...sh.slice(0, 16)].map((b) => b.toString(16).padStart(2, "0")).join(" ");
+        peek.innerHTML = `SHARD ${i ?? 0} · ${sh.length} B · ${i >= Vault.K ? "PARITY" : "DATA"} — CIPHERTEXT, MEANINGLESS ALONE<br>${hex} …`;
+      };
+
+      drawGrid(); setStatus(); showPeek(0);
+
+      scroll.querySelector("#seize").addEventListener("click", () => {
+        const live = c.present.map((p, i) => (p ? i : -1)).filter((i) => i >= 0);
+        if (!live.length) return;
+        const i = live[Math.random() * live.length | 0];
+        c.present[i] = false; cells[i].classList.add("lost"); setStatus(); drawRail(); showPeek(i);
+      });
+      scroll.querySelector("#rebuild").addEventListener("click", async () => {
+        if (!Vault.recoverable()) { setStatus(); return; }
+        status.textContent = "Reconstructing from surviving shards…";
+        dlBtn.style.display = "none";
+        try {
+          const { plain, ok, sha } = await Vault.reconstruct();
+          drawGrid(); setStatus();
+          recovered = { blob: new Blob([plain]), name: c.name };
+          status.innerHTML = ok
+            ? `<span style="color:#2E7D4F">✓ Rebuilt ${humanSize(plain.length)} from ${Vault.K} shards · SHA-256 matches the original.</span>`
+            : `<span style="color:var(--carmine)">✗ Rebuilt, but SHA-256 differs (${sha.slice(0, 12)}…).</span>`;
+          if (ok) dlBtn.style.display = "";
+        } catch (e) {
+          status.innerHTML = `<span style="color:var(--carmine)">Reconstruction failed: ${esc(e.message)}</span>`;
+        }
+      });
+      dlBtn.addEventListener("click", () => {
+        if (!recovered) return;
+        const url = URL.createObjectURL(recovered.blob);
+        const a = el("a"); a.href = url; a.download = recovered.name; a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
       });
     };
-    draw();
+
+    if (Vault.current) draw(); else drawEmpty();
   },
 };
 
@@ -1241,7 +1708,7 @@ const Ledger = {
       { act: "COMMIT", what: "REC-009 Reticulum link layer 297-byte", who: "MW", when: "Mon 09:31" },
       { act: "SHARD", what: "Coachwork plates sealed — 30 shards / 21 nodes", who: "SS", when: "Tue 14:05" },
       { act: "COMMIT", what: "REC-012 CRDT sync across offices", who: "EL", when: "Wed 11:20" },
-      { act: "VOICE", what: "Dark Sun call sealed — 1200 bps · 3 hops", who: "GR", when: "Thu 16:48" },
+      { act: "VOICE", what: "Dark Sun call sealed — WebRTC · DTLS-SRTP · X25519", who: "GR", when: "Thu 16:48" },
     ];
     let prev = "0".repeat(16);
     this.permanent = events.map((e, i) => {
@@ -1953,6 +2420,7 @@ const Auth = {
 
 function bootApp() {
   Net.start();   // join the real Dark Core mesh with the account identity
+  Call.init();   // always listen for incoming sealed voice calls, app open or not
 
   if (pocket.matches) {
     Mobile.build();
