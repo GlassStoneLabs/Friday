@@ -970,6 +970,7 @@ const Board = {
     { id: "done", name: "Done", color: "#2E7D4F" },
   ],
   cards: new Map(),          // id -> { id, col, t, tag, who, ord, v, node, del }
+  colv: new Map(),           // colId -> { name, v, node } — LWW override of a column's name
   clock: 0,
   loaded: false,
   subs: new Set(),
@@ -998,17 +999,25 @@ const Board = {
     try { raw = (Account.unlocked && Account.store.boards) || JSON.parse(localStorage.getItem("friday.boards") || "null"); } catch {}
     if (raw && Array.isArray(raw.cards)) {
       raw.cards.forEach((c) => this.cards.set(c.id, c));
+      (raw.cols || []).forEach((o) => this.colv.set(o.col, { name: o.name, v: o.v, node: o.node }));
       this.clock = raw.clock || 0;
     } else {
       this.seed();
     }
   },
   persist() {
-    const snap = { cards: [...this.cards.values()], clock: this.clock };
+    const snap = {
+      cards: [...this.cards.values()],
+      cols: [...this.colv.entries()].map(([col, o]) => ({ col, ...o })),
+      clock: this.clock,
+    };
     // signed in → encrypted in the vault only; otherwise plain localStorage
     if (Account.unlocked) { Account.save({ boards: snap }); try { localStorage.removeItem("friday.boards"); } catch {} }
     else try { localStorage.setItem("friday.boards", JSON.stringify(snap)); } catch {}
   },
+
+  colName(colId) { return this.colv.get(colId)?.name ?? (this.cols.find((c) => c.id === colId)?.name || colId); },
+  colSnapshot() { return [...this.colv.entries()].map(([col, o]) => ({ col, ...o })); },
 
   list(colId) {
     return [...this.cards.values()].filter((c) => !c.del && c.col === colId).sort((a, b) => (a.ord - b.ord) || (a.v - b.v));
@@ -1033,6 +1042,25 @@ const Board = {
     if (cur && !(card.v > cur.v || (card.v === cur.v && card.node > cur.node))) return false;
     this.cards.set(card.id, card);
     if (card.v > this.clock) this.clock = card.v;   // stay ahead of what we've seen
+    this.persist();
+    this.emit();
+    return true;
+  },
+
+  // rename a column — same LWW discipline as cards, keyed by column id
+  editCol(colId, name) {
+    this.clock++;
+    this.colv.set(colId, { name, v: this.clock, node: Net.id });
+    this.persist();
+    Net.send({ t: "board:col", id: Net.id, col: colId, name, v: this.clock, node: Net.id });
+    this.emit();
+  },
+  mergeCol(op) {
+    if (!op || !op.col) return false;
+    const cur = this.colv.get(op.col);
+    if (cur && !(op.v > cur.v || (op.v === cur.v && op.node > cur.node))) return false;
+    this.colv.set(op.col, { name: op.name, v: op.v, node: op.node });
+    if (op.v > this.clock) this.clock = op.v;
     this.persist();
     this.emit();
     return true;
@@ -1065,7 +1093,20 @@ Apps.boards = {
         const cards = Board.list(col.id);
         const c = el("div", "col");
         c.dataset.col = col.id;
-        c.innerHTML = `<div class="col-head mono"><span class="col-dot" style="background:${col.color}"></span>${col.name.toUpperCase()}<span class="count">${cards.length}</span></div>`;
+        c.innerHTML = `<div class="col-head mono"><span class="col-dot" style="background:${col.color}"></span><span class="col-name" title="Double-click to rename">${esc(Board.colName(col.id).toUpperCase())}</span><span class="count">${cards.length}</span></div>`;
+        c.querySelector(".col-name").addEventListener("dblclick", (e) => {
+          e.stopPropagation();
+          const cur = Board.colName(col.id);
+          const inp = el("input");
+          inp.type = "text"; inp.value = cur;
+          Object.assign(inp.style, { flex: "1", minWidth: "0", padding: "2px 6px", borderRadius: "6px", border: "1px solid var(--pane-edge)", background: "var(--pane-bg)", outline: "none", font: "inherit", textTransform: "uppercase" });
+          const nameEl = c.querySelector(".col-name");
+          nameEl.replaceWith(inp); inp.focus(); inp.select();
+          let done = false;
+          const commit = () => { if (done) return; done = true; const t = inp.value.trim(); if (t && t !== cur) Board.editCol(col.id, t); else draw(); };
+          inp.addEventListener("keydown", (ev) => { if (ev.key === "Enter") commit(); if (ev.key === "Escape") { done = true; draw(); } });
+          inp.addEventListener("blur", commit);
+        });
         const drop = el("div", "col-drop");
         cards.forEach((card) => {
           const k = el("div", "card");
@@ -1123,8 +1164,9 @@ Apps.boards = {
     // live sync — merge remote ops, answer/emit full-state requests on join
     const onApp = (m) => {
       if (m.t === "board:op") Board.merge(m.card);
-      else if (m.t === "board:full" && Array.isArray(m.cards)) m.cards.forEach((c) => Board.merge(c));
-      else if (m.t === "board:req") Net.send({ t: "board:full", id: Net.id, cards: [...Board.cards.values()] });
+      else if (m.t === "board:col") Board.mergeCol(m);
+      else if (m.t === "board:full") { (m.cards || []).forEach((c) => Board.merge(c)); (m.cols || []).forEach((o) => Board.mergeCol(o)); }
+      else if (m.t === "board:req") Net.send({ t: "board:full", id: Net.id, cards: [...Board.cards.values()], cols: Board.colSnapshot() });
     };
     this._unsub = [
       Board.onChange(draw),

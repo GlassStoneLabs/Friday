@@ -388,6 +388,8 @@ html[data-theme="dark"][data-wallpaper="limestone"] #wallpaper {
 .col { flex: 0 0 218px; display: flex; flex-direction: column; gap: 9px; }
 .col-head { display: flex; align-items: center; gap: 7px; padding: 0 4px; color: var(--muted); }
 .col-head .count { margin-left: auto; font-family: var(--font-mono); font-size: 8.5px; }
+.col-name { cursor: text; border-radius: 4px; transition: color var(--t-hover) var(--ease); }
+.col-name:hover { color: var(--body); }
 .col-dot { width: 8px; height: 8px; border-radius: 50%; }
 .card {
   padding: 11px 13px; border-radius: 12px; cursor: grab;
