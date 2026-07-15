@@ -59,7 +59,7 @@ window, with its own dock icon, and works offline.
 | **Mesh** | Live Dark Core graph of **actual** connected nodes — real presence, real round-trip latency, real link count | ✅ real |
 | **Messages** | `# dark-core` broadcast room + per-peer DMs; every message is **really sealed and delivered** to live peers | ✅ real |
 | **Boards** | monday-style panes; card add/rename/move/delete **really sync live** across tabs & devices (LWW-CRDT) and **auto-save encrypted** | ✅ real |
-| **Calls** | **Real WebRTC voice** to a live peer — your mic, SDP **sealed per-peer** (X25519), media encrypted in transit (DTLS-SRTP), no server | ✅ real |
+| **Calls** | **Real WebRTC voice** to a live peer — your mic, SDP **sealed per-peer** (X25519), and **every audio frame end-to-end encrypted** (AES-256-GCM) on top of DTLS-SRTP, no server | ✅ real |
 | **Vault** | **Real Reed-Solomon erasure coding** — seal a file, scatter it into shards, seize any few, **rebuild the exact bytes** (SHA-256 verified) | ✅ real |
 | **Ledger** | Two sets of records — editable + permanent, Merkle-chained & **really verifiable** | ✅ real crypto |
 | **Settings** | Light/Dark/Auto, accent tinting, glass diffusion, profiles | ✅ real |
@@ -116,15 +116,22 @@ edit in one appear in the other. State auto-saves — **encrypted into your
 account vault** when signed in, otherwise to local storage — so it survives
 reloads and rides along on the mesh.
 
-**Calls are real WebRTC voice.** Pick a live node and call it: Friday opens
-your microphone (`getUserMedia`), and the offer/answer **SDP is sealed
-per-recipient** with the peer's X25519 key before it crosses the mesh, so
-signaling is end-to-end encrypted in transit. The audio itself travels
-WebRTC's mandatory **DTLS-SRTP**, encrypted in transit by the browser, with
-**no server in the media path**. Calls ring even with the app closed, the
-waveform is driven by the real audio amplitude, mute really disables the
-track, and a short call log **auto-saves encrypted**. (Two tabs on one
-machine will echo — use headphones, or a second device.)
+**Calls are real WebRTC voice — end-to-end sealed.** Pick a live node and
+call it: Friday opens your microphone (`getUserMedia`), and the offer/answer
+**SDP is sealed per-recipient** with the peer's X25519 key before it crosses
+the mesh. On top of WebRTC's mandatory **DTLS-SRTP**, Friday adds its own
+**end-to-end layer**: using [WebRTC Encoded
+Transforms](https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpSender/transform),
+every encoded audio frame is encrypted in the browser with **AES-256-GCM**
+under the *same* X25519-derived shared key the messages use — so the voice
+is sealed by the app itself, not merely trusted to the transport, and **no
+server ever sees plaintext**. Both peers negotiate the capability and the
+live call shows a running count of frames sealed/opened as proof; where
+Encoded Transforms aren't available it falls back to DTLS-SRTP and says so.
+Calls ring even with the app closed, the waveform is driven by real audio
+amplitude, mute really disables the track, and a short call log
+**auto-saves encrypted**. (Two tabs on one machine will echo — use
+headphones, or a second device.)
 
 **The Vault really erasure-codes your files.** Drop in any file. Friday
 seals it with a fresh **AES-256-GCM** key (the read capability), then

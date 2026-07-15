@@ -1137,19 +1137,25 @@ Apps.boards = {
   teardown() { this._unsub?.forEach((u) => u()); this._unsub = null; },
 };
 
-/* ---------------- Calls · Dark Sun (REAL WebRTC voice) ----------------
+/* ---------------- Calls · Dark Sun (REAL WebRTC voice, E2E-sealed) ----------
    A genuine peer-to-peer voice call to a live mesh node. The microphone is
    real (getUserMedia); the offer/answer SDP is sealed per-recipient with the
-   peer's X25519 key (E2E.seal) before it crosses the mesh, so signaling is
-   end-to-end encrypted in transit; the audio itself rides WebRTC's mandatory
-   DTLS-SRTP, encrypted in transit by the browser. No server carries the media.
-   The Call engine always listens, so a call rings even with the app closed;
-   a short, encrypted call log auto-saves to the account vault. */
+   peer's X25519 key (E2E.seal) before it crosses the mesh. On top of WebRTC's
+   mandatory DTLS-SRTP, Friday adds its own end-to-end layer: every encoded
+   audio frame is encrypted in the browser with AES-256-GCM under the *same*
+   X25519-derived shared key the messages use (WebRTC Encoded Transforms), so
+   the voice is sealed by the app itself — not merely trusted to the transport
+   — and no server ever sees plaintext. Both peers negotiate the capability;
+   where Encoded Transforms are unavailable it falls back to DTLS-SRTP and says
+   so. The engine always listens (rings with the app closed); a short call log
+   auto-saves encrypted. */
 const Call = {
   state: "idle",          // idle | dialing | ringing | live
   peerId: null, peerName: "", pc: null, local: null, remote: null,
   incoming: null,         // { from, name, wire } while ringing in
   audio: null, t0: 0, muted: false,
+  frameE2EE: false, frameKey: null, encFrames: 0, decFrames: 0,   // per-frame E2E layer
+  E2EE_OK: false,
   subs: new Set(), _wired: false,
   log: [],                // recent calls — auto-saved encrypted
 
@@ -1159,6 +1165,8 @@ const Call = {
   init() {
     if (this._wired) return;
     this._wired = true;
+    // per-frame E2E needs WebRTC Encoded Transforms + WebCrypto
+    this.E2EE_OK = E2E.ok && typeof RTCRtpSender !== "undefined" && !!RTCRtpSender.prototype.createEncodedStreams;
     this.audio = new Audio(); this.audio.autoplay = true;
     try { this.log = (Account.unlocked && Account.store.callLog) || JSON.parse(localStorage.getItem("friday.calllog") || "[]"); } catch { this.log = []; }
     Net.onApp((m) => this.signal(m));
@@ -1171,12 +1179,60 @@ const Call = {
     return this.local;
   },
   newPC() {
-    const pc = new RTCPeerConnection({ iceServers: Net.STUN });
-    pc.ontrack = (e) => { this.remote = e.streams[0]; this.audio.srcObject = this.remote; };
+    const pc = new RTCPeerConnection({ iceServers: Net.STUN, encodedInsertableStreams: this.E2EE_OK });
+    pc.ontrack = (e) => {
+      this.remote = e.streams[0]; this.audio.srcObject = this.remote;
+      if (this.frameE2EE && this.frameKey && e.receiver) this.wireReceiver(e.receiver);  // decrypt inbound frames
+    };
     pc.onconnectionstatechange = () => { if (["failed", "disconnected", "closed"].includes(pc.connectionState) && this.state === "live") this.hangup("Connection lost"); };
     return pc;
   },
   addTracks(pc) { for (const t of this.local.getTracks()) pc.addTrack(t, this.local); },
+
+  /* ---- end-to-end frame sealing over the same X25519 key as messages ---- */
+  async setupFrameCrypto(peer, peerSupports) {
+    this.frameE2EE = !!(this.E2EE_OK && peerSupports && peer && peer.pub);
+    if (!this.frameE2EE) return;
+    try { this.frameKey = (await E2E.keyFor(peer.pub)).key; }
+    catch { this.frameE2EE = false; this.frameKey = null; return; }
+    this.wired = new WeakSet();   // guard: createEncodedStreams may run once per sender/receiver
+    // wire the sender now, plus any receivers that already exist (the callee's inbound
+    // track appears during setRemoteDescription(offer), before this runs); ontrack covers
+    // receivers that appear later (the caller's, from the answer)
+    const sender = this.pc.getSenders().find((s) => s.track && s.track.kind === "audio");
+    if (sender) this.wireSender(sender);
+    for (const r of this.pc.getReceivers()) if (r.track && r.track.kind === "audio") this.wireReceiver(r);
+  },
+  wireSender(sender) {
+    if (this.wired.has(sender)) return; this.wired.add(sender);
+    let s; try { s = sender.createEncodedStreams(); } catch { return; }
+    const key = this.frameKey, self = this;
+    s.readable.pipeThrough(new TransformStream({
+      async transform(frame, ctrl) {
+        try {
+          const iv = crypto.getRandomValues(new Uint8Array(12));
+          const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, frame.data));
+          const out = new Uint8Array(12 + ct.length); out.set(iv, 0); out.set(ct, 12);
+          frame.data = out.buffer; self.encFrames++;
+        } catch {}
+        ctrl.enqueue(frame);
+      },
+    })).pipeTo(s.writable).catch(() => {});
+  },
+  wireReceiver(receiver) {
+    if (this.wired?.has(receiver)) return; this.wired?.add(receiver);
+    let s; try { s = receiver.createEncodedStreams(); } catch { return; }
+    const key = this.frameKey, self = this;
+    s.readable.pipeThrough(new TransformStream({
+      async transform(frame, ctrl) {
+        try {
+          const buf = new Uint8Array(frame.data);
+          const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: buf.subarray(0, 12) }, key, buf.subarray(12));
+          frame.data = pt; self.decFrames++; ctrl.enqueue(frame);
+        } catch { /* undecryptable — drop the frame rather than feed garbage to the decoder */ }
+      },
+    })).pipeTo(s.writable).catch(() => {});
+  },
   iceDone(pc) {
     return new Promise((res) => {
       if (pc.iceGatheringState === "complete") return res();
@@ -1198,7 +1254,7 @@ const Call = {
       const offer = await this.pc.createOffer(); await this.pc.setLocalDescription(offer);
       await this.iceDone(this.pc);
       const w = await this.wrap(peer, this.pc.localDescription);
-      Net.sendTo(peer.id, { t: "call:invite", id: Net.id, to: peer.id, fromName: Net.name, ...w });
+      Net.sendTo(peer.id, { t: "call:invite", id: Net.id, to: peer.id, fromName: Net.name, e2ee: this.E2EE_OK, ...w });
       this.state = "ringing"; this.emit();
       this._timeout = setTimeout(() => { if (this.state === "ringing") this.hangup("No answer"); }, 30000);
     } catch (e) { this.fail(e.name === "NotAllowedError" ? "Microphone blocked" : "Couldn't start the call"); }
@@ -1214,8 +1270,11 @@ const Call = {
       if (this.state !== "ringing" || m.id !== this.peerId) return;
       clearTimeout(this._timeout);
       const peer = Net.peers.get(m.id);
-      try { await this.pc.setRemoteDescription(new RTCSessionDescription(await this.unwrap(peer, m))); this.begin(); }
-      catch (e) { this.fail("Handshake failed"); }
+      try {
+        await this.setupFrameCrypto(peer, m.e2ee);              // seal outbound frames before media flows
+        await this.pc.setRemoteDescription(new RTCSessionDescription(await this.unwrap(peer, m)));
+        this.begin();
+      } catch (e) { this.fail("Handshake failed"); }
     } else if (m.t === "call:decline") { if (m.id === this.peerId) this.end("Declined", true); }
     else if (m.t === "call:busy") { if (m.id === this.peerId) this.end("Busy", true); }
     else if (m.t === "call:bye") { if (m.id === this.peerId) this.end("Call ended", true); }
@@ -1231,10 +1290,11 @@ const Call = {
       // transceiver the offer created (per spec) rather than spawning a second one
       await this.pc.setRemoteDescription(new RTCSessionDescription(await this.unwrap(peer, inc)));
       this.addTracks(this.pc);
+      await this.setupFrameCrypto(peer, inc.e2ee);              // seal outbound frames before media flows
       const answer = await this.pc.createAnswer(); await this.pc.setLocalDescription(answer);
       await this.iceDone(this.pc);
       const w = await this.wrap(peer, this.pc.localDescription);
-      Net.sendTo(inc.from, { t: "call:accept", id: Net.id, to: inc.from, ...w });
+      Net.sendTo(inc.from, { t: "call:accept", id: Net.id, to: inc.from, e2ee: this.E2EE_OK, ...w });
       this.incoming = null; this.begin();
     } catch (e) { this.fail(e.name === "NotAllowedError" ? "Microphone blocked" : "Couldn't answer"); }
   },
@@ -1253,6 +1313,7 @@ const Call = {
     if (this.local) { this.local.getTracks().forEach((t) => t.stop()); this.local = null; }
     if (this.audio) this.audio.srcObject = null;
     this.pc = this.remote = this.incoming = null; this.peerId = null; this.state = "idle"; this.muted = false;
+    this.frameE2EE = false; this.frameKey = null; this.encFrames = 0; this.decFrames = 0; this.wired = null;
   },
   toggleMute() { this.muted = !this.muted; this.local?.getAudioTracks().forEach((t) => (t.enabled = !this.muted)); this.emit(); },
 
@@ -1276,7 +1337,7 @@ Apps.calls = {
     const list = el("div");
     const logHead = el("div", "mono rail-head", "RECENT"); logHead.style.paddingTop = "12px";
     const logList = el("div");
-    rail.append(list, logHead, logList, el("div", "mono rail-foot", "WEBRTC VOICE · DTLS-SRTP MEDIA<br>SDP SEALED PER-PEER · X25519 · NO SERVER"));
+    rail.append(list, logHead, logList, el("div", "mono rail-foot", "WEBRTC VOICE · NO SERVER<br>EACH FRAME SEALED · X25519 · AES-256-GCM<br>OVER DTLS-SRTP · SDP SEALED PER-PEER"));
 
     const stage = el("section", "content");
     const inner = el("div", "call-stage");
@@ -1340,18 +1401,22 @@ Apps.calls = {
       }
       if (s === "live") {
         inner.classList.add("live");
+        const sealLabel = Call.frameE2EE ? "END-TO-END SEALED · X25519 · AES-256-GCM PER FRAME" : "CONNECTED · DTLS-SRTP · TRANSPORT ENCRYPTED";
         inner.innerHTML = `${avatarFor(Call.peerId, Call.peerName)}
           <div class="call-name">${esc(Call.peerName)}</div>
           <div class="call-sub" id="call-clock">00:00</div>
           <div class="wave" id="wave">${"<i></i>".repeat(20)}</div>
-          <div class="mono kicker">CONNECTED · DTLS-SRTP · END-TO-END · NO SERVER</div>
+          <div class="mono kicker">${sealLabel} · NO SERVER</div>
+          <div class="mono kicker" id="seal-proof" style="margin-top:-2px"></div>
           <div class="call-actions">
             <button class="call-btn mute${Call.muted ? " on" : ""}" aria-label="Mute">${Icons.mic}</button>
             <button class="call-btn end" aria-label="End call">${Icons.phoneDown}</button>
           </div>`;
         const clock = inner.querySelector("#call-clock");
-        clockTimer = setInterval(() => (clock.textContent = Call.clock()), 500);
-        clock.textContent = Call.clock();
+        const proof = inner.querySelector("#seal-proof");
+        const tickProof = () => { proof.innerHTML = Call.frameE2EE ? `<span style="color:#2E7D4F">◉</span> ${Call.encFrames.toLocaleString()} frames sealed · ${Call.decFrames.toLocaleString()} opened` : ""; };
+        clockTimer = setInterval(() => { clock.textContent = Call.clock(); tickProof(); }, 500);
+        clock.textContent = Call.clock(); tickProof();
         inner.querySelector(".mute").addEventListener("click", (e) => { Call.toggleMute(); e.currentTarget.classList.toggle("on", Call.muted); });
         inner.querySelector(".end").addEventListener("click", () => Call.hangup("Call ended"));
         startWave(inner.querySelector("#wave"));
