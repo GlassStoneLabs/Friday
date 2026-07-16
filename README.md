@@ -13,6 +13,32 @@ Hudson palette (Parchment by day, Anthracite by night, Carmine as the
 voice), serif display type, mono maker's marks, and motion that settles
 instead of bouncing.
 
+## The backend (optional)
+
+Friday works with **no server at all** — the mesh is peer-to-peer. A server adds
+exactly three things: an account you can prove is yours, an **organization**, and
+a rendezvous so devices connect without copy/pasting codes.
+
+```sh
+node server/friday-server.mjs        # serves the API *and* the app on :4000
+```
+Then open <http://localhost:4000>, create an account, and **create an org or join
+one with an invite code** (`ABCD-EFGH-JKMN`). Zero dependencies — `node:http`,
+`node:sqlite`, `node:crypto`. Data lives in `server/friday.db` (`FRIDAY_DB=` to move it).
+
+**There is no password on the server.** Your account *is* a keypair: you sign a
+one-time nonce with Ed25519 to prove it's you. The passphrase never leaves the
+browser — it only decrypts your local vault.
+
+| The server knows | The server never sees |
+| --- | --- |
+| display names, public keys, org membership, who's online, blob sizes/timing | message plaintext, board contents, voice audio, vault files, your passphrase |
+
+Everything stays sealed end-to-end (X25519 · HKDF · AES-256-GCM) between the
+endpoints. Once two devices are introduced, traffic goes **direct** — it does not
+route back through the server. Without a server, the org panel says so plainly and
+the mesh keeps working.
+
 ## Install — pick whichever is easiest
 
 **0 · Just visit the site**

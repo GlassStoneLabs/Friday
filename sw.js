@@ -1,5 +1,5 @@
 /* Friday — offline shell. The glass never disappears; it returns to the air. */
-const CACHE = "friday-v2";   // v2 — real Boards sync, WebRTC Calls, Reed-Solomon Vault
+const CACHE = "friday-v3";   // v3 — org backend; the API is never cached
 const SHELL = [
   ".",
   "index.html",
@@ -25,6 +25,11 @@ self.addEventListener("activate", (e) => {
 
 self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET") return;
+  const url = new URL(e.request.url);
+  // The shell is cacheable; live state is not. Caching /api/* would serve a
+  // stale directory forever (an org you just joined would never appear), and
+  // /api/events is an endless stream — never hand either to the cache.
+  if (url.origin !== location.origin || url.pathname.startsWith("/api/")) return;
   e.respondWith(
     caches.match(e.request).then((hit) =>
       hit ||

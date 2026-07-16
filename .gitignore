@@ -1,1 +1,4 @@
 .DS_Store
+server/friday.db
+server/friday.db-shm
+server/friday.db-wal

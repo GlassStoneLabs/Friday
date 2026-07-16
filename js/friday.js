@@ -511,9 +511,42 @@ const Account = {
     catch { kp = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]); alg = "P-256"; }
     const privJwk = await crypto.subtle.exportKey("jwk", kp.privateKey);
     const pubRaw = new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey));
-    const vault = { name, alg, privJwk, pubRaw: b64(pubRaw), createdAt: Date.now(), store: {} };
+    // a second keypair, for signatures: this is what proves who you are to an
+    // org server. Reticulum's pairing — X25519 to seal, Ed25519 to sign.
+    const sign = await this.makeSigningKey();
+    const vault = {
+      name, alg, privJwk, pubRaw: b64(pubRaw), createdAt: Date.now(), store: {},
+      signAlg: sign.alg, signPrivJwk: sign.privJwk, signPubJwk: sign.pubJwk,
+    };
     await this.writeVault(vault, pass);
     await this.activate(vault);
+  },
+
+  async makeSigningKey() {
+    let kp, alg;
+    try { kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]); alg = "Ed25519"; }
+    catch { kp = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]); alg = "P-256"; }
+    return {
+      alg,
+      privJwk: await crypto.subtle.exportKey("jwk", kp.privateKey),
+      pubJwk: await crypto.subtle.exportKey("jwk", kp.publicKey),
+    };
+  },
+
+  // the exact string the server hashes into an account id — key order must never drift
+  signPubString() {
+    const j = this.vault?.signPubJwk;
+    if (!j) return null;
+    return j.kty === "OKP"
+      ? JSON.stringify({ crv: j.crv, kty: j.kty, x: j.x })
+      : JSON.stringify({ crv: j.crv, kty: j.kty, x: j.x, y: j.y });
+  },
+
+  async signNonce(nonce) {
+    if (!this.signPriv) return null;
+    const data = new TextEncoder().encode(nonce);
+    const params = this.vault.signAlg === "Ed25519" ? { name: "Ed25519" } : { name: "ECDSA", hash: "SHA-256" };
+    return b64(new Uint8Array(await crypto.subtle.sign(params, this.signPriv, data)));
   },
 
   async unlock(pass) {
@@ -540,6 +573,17 @@ const Account = {
     this.vault = vault;
     this.unlocked = true;
     E2E.adopt(this.identity);
+
+    // vaults made before orgs existed have no signing key — mint one and keep it
+    if (!vault.signPubJwk && this._key) {
+      const sign = await this.makeSigningKey();
+      Object.assign(vault, { signAlg: sign.alg, signPrivJwk: sign.privJwk, signPubJwk: sign.pubJwk });
+      await this.save({});
+    }
+    if (vault.signPrivJwk) {
+      const sp = vault.signAlg === "Ed25519" ? { name: "Ed25519" } : { name: "ECDSA", namedCurve: "P-256" };
+      try { this.signPriv = await crypto.subtle.importKey("jwk", vault.signPrivJwk, sp, false, ["sign"]); } catch { this.signPriv = null; }
+    }
   },
 
   // persist an "encrypted page" of app data back into the vault
@@ -561,6 +605,107 @@ const Account = {
     for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
     return "n-" + h.toString(36);
   },
+};
+
+/* ---------------- Server · org rendezvous & directory (optional) ----------------
+   Friday runs perfectly with no server at all — the mesh is peer-to-peer.
+   A server adds exactly three things and nothing more:
+     • an account you can prove is yours by SIGNING a nonce (no password is
+       ever sent; the passphrase only ever decrypts the local vault),
+     • an org: who belongs, and each member's public key,
+     • a rendezvous so two devices can find each other and then connect
+       directly — after which traffic no longer passes through it.
+   Message plaintext never reaches the server. It does learn metadata:
+   names, public keys, membership, and who is online. */
+const Server = {
+  base: localStorage.getItem("friday.server") || location.origin,
+  available: false,
+  token: null, account: null, orgs: [], members: [],
+  es: null, subs: new Set(),
+
+  on(fn) { this.subs.add(fn); return () => this.subs.delete(fn); },
+  emit(ev, data) { for (const f of this.subs) try { f(ev, data); } catch {} },
+
+  async probe() {
+    try {
+      const r = await fetch(this.base + "/api/health", { cache: "no-store" });
+      this.available = r.ok;
+    } catch { this.available = false; }
+    return this.available;
+  },
+
+  async call(path, body, method) {
+    const r = await fetch(this.base + "/api" + path, {
+      method: method || (body ? "POST" : "GET"),
+      headers: { "content-type": "application/json", ...(this.token ? { authorization: "Bearer " + this.token } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || `request failed (${r.status})`);
+    return data;
+  },
+
+  // register or resume a session by signing a one-time nonce
+  async authenticate() {
+    if (!Account.unlocked || !Account.signPriv) return false;
+    const signPub = Account.signPubString();
+    const boxPub = b64(Account.identity.pubRaw);
+    const { nonce } = await this.call("/challenge", { signPub });
+    const sig = await Account.signNonce(nonce);
+    let res;
+    try {
+      res = await this.call("/login", { signPub, nonce, sig, boxPub });
+    } catch {
+      const again = await this.call("/challenge", { signPub });
+      res = await this.call("/register", {
+        name: Account.name, signPub, boxPub,
+        nonce: again.nonce, sig: await Account.signNonce(again.nonce),
+      });
+    }
+    this.token = res.token; this.account = res.account;
+    const me = await this.call("/me");
+    this.orgs = me.orgs || [];
+    return true;
+  },
+
+  async createOrg(name) {
+    const r = await this.call("/orgs", { name });
+    this.orgs = (await this.call("/me")).orgs || [];
+    return r;
+  },
+  async joinOrg(code) {
+    const r = await this.call("/orgs/join", { code });
+    this.orgs = (await this.call("/me")).orgs || [];
+    return r;
+  },
+  async invite(orgId, fresh) { return this.call(`/orgs/${orgId}/invites`, { fresh: !!fresh }); },
+  async loadMembers(orgId) {
+    const r = await this.call(`/orgs/${orgId}/members`);
+    this.members = r.members || [];
+    this.emit("members", this.members);
+    return this.members;
+  },
+  org() { return this.orgs[0] || null; },
+
+  // live: presence, rendezvous, and mail that arrived while we were away
+  connect() {
+    if (!this.token || this.es) return;
+    this.es = new EventSource(`${this.base}/api/events?token=${encodeURIComponent(this.token)}`);
+    this.es.addEventListener("presence", (e) => {
+      const d = JSON.parse(e.data);
+      this.emit("presence", d);
+      Net.onOrgPresence(d.online || []);
+    });
+    this.es.addEventListener("signal", (e) => Net.onSignal(JSON.parse(e.data)));
+    this.es.addEventListener("member-joined", (e) => {
+      const d = JSON.parse(e.data);
+      if (this.org()) this.loadMembers(this.org().id);
+      this.emit("member-joined", d);
+    });
+    this.es.addEventListener("mail", (e) => Net.onMail(JSON.parse(e.data)));
+    this.es.onerror = () => this.emit("error", null);   // EventSource retries on its own
+  },
+  disconnect() { try { this.es?.close(); } catch {} this.es = null; },
 };
 
 /* ---------------- Net · Dark Core transport (REAL, serverless) ----------------
@@ -703,7 +848,13 @@ const Net = {
     });
   },
   wireChannel(pc, ch) {
-    ch.onopen = () => { this.announce(); };
+    // Announce down THIS channel directly. Going through send() would skip it:
+    // a channel only lands in this.rtc once a hello arrives over it, so waiting
+    // for the registry first would deadlock the handshake.
+    ch.onopen = () => {
+      try { ch.send(JSON.stringify({ t: "hello", id: this.id, name: this.name, pub: this.pub })); } catch {}
+      this.announce();
+    };
     ch.onmessage = (e) => { try { this.recv(JSON.parse(e.data), "rtc"); } catch {} };
     ch.onclose = () => {
       for (const [id, c] of this.rtc) if (c === ch) { this.rtc.delete(id); this.peers.delete(id); }
@@ -715,6 +866,68 @@ const Net = {
       try { const m = JSON.parse(e.data); if (m.t === "hello") { this.rtc.set(m.id, ch); if (this.peers.get(m.id)) this.peers.get(m.id).transport = "rtc"; } } catch {}
       orig(e);
     };
+  },
+
+  /* ---- org rendezvous: connect to org members with no copy/paste ----
+     The server only ferries opaque SDP. Media/data go peer-to-peer.
+     Deterministic roles avoid glare: lower account id makes the offer. */
+  links: new Map(),          // accountId -> RTCPeerConnection
+
+  onOrgPresence(onlineIds) {
+    if (!Server.account) return;
+    const mine = Server.account.id;
+    for (const id of onlineIds) {
+      if (id === mine || this.links.has(id)) continue;
+      if (mine < id) this.offerTo(id);        // only one side initiates
+    }
+    for (const [id, pc] of this.links) {
+      if (!onlineIds.includes(id)) { try { pc.close(); } catch {} this.links.delete(id); }
+    }
+  },
+
+  newLink(peerId) {
+    const pc = new RTCPeerConnection({ iceServers: this.STUN });
+    this.links.set(peerId, pc);
+    pc.onconnectionstatechange = () => {
+      if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
+        this.links.delete(peerId);
+        try { pc.close(); } catch {}
+        this.emitPeers();
+      }
+    };
+    return pc;
+  },
+
+  async offerTo(peerId) {
+    try {
+      const pc = this.newLink(peerId);
+      const ch = pc.createDataChannel("dark-core");
+      this.wireChannel(pc, ch);
+      await pc.setLocalDescription(await pc.createOffer());
+      await this.iceDone(pc);
+      await Server.call("/signal", { to: peerId, payload: { kind: "offer", sdp: pc.localDescription } });
+    } catch { this.links.delete(peerId); }
+  },
+
+  async onSignal({ from, payload }) {
+    try {
+      if (payload.kind === "offer") {
+        const pc = this.newLink(from);
+        pc.ondatachannel = (e) => this.wireChannel(pc, e.channel);
+        await pc.setRemoteDescription(payload.sdp);
+        await pc.setLocalDescription(await pc.createAnswer());
+        await this.iceDone(pc);
+        await Server.call("/signal", { to: from, payload: { kind: "answer", sdp: pc.localDescription } });
+      } else if (payload.kind === "answer") {
+        const pc = this.links.get(from);
+        if (pc && !pc.currentRemoteDescription) await pc.setRemoteDescription(payload.sdp);
+      }
+    } catch { this.links.delete(from); }
+  },
+
+  // ciphertext held for us while we were offline — open it like any sealed frame
+  onMail({ from, fromName, payload }) {
+    this.emitMsg({ ...payload, from: payload.from || from, fromName, viaMailbox: true });
   },
 
   linkDialog() {
@@ -2037,6 +2250,63 @@ Apps.settings = {
       }
       scroll.append(pf);
 
+      // organization — only real if a server is reachable
+      const og = el("div", "pane set-section");
+      og.append(el("div", "set-title", "Organization"));
+      const org = Server.org();
+      if (!Server.available) {
+        og.append(el("div", "set-sub", "No org server reachable — Friday is running peer-to-peer only. Messages, boards, calls and the vault all still work between devices on the mesh."));
+      } else if (!org) {
+        const row = el("div", "set-row");
+        row.innerHTML = `<div><div class="set-label">Not in an organization</div><div class="set-sub">Join one with an invite code, or create your own.</div></div>`;
+        const b = el("button", "rail-item", "Join or create…");
+        b.style.cssText = "width:auto;background:color-mix(in srgb,var(--accent) 14%,transparent)";
+        b.addEventListener("click", () => Auth.orgStep(() => refreshOpenSettings()));
+        row.append(b);
+        og.append(row);
+      } else {
+        const head = el("div", "set-row");
+        head.innerHTML = `<div><div class="set-label">${esc(org.name)}</div><div class="set-sub">You are ${esc(org.role)} · signed in as ${esc(Server.account?.name || Account.name)}</div></div>`;
+        og.append(head);
+
+        const memRow = el("div", "set-row");
+        memRow.style.display = "block";
+        memRow.innerHTML = `<div class="set-label" style="margin-bottom:7px">Members</div>`;
+        const list = el("div");
+        memRow.append(list);
+        const paintMembers = (ms) => {
+          list.replaceChildren();
+          if (!ms.length) { list.append(el("div", "set-sub", "Loading the directory…")); return; }
+          for (const m of ms) {
+            const r = el("div", "transport" + (m.online ? "" : " off"));
+            r.innerHTML = `<span class="t-dot"></span><span><div class="t-name">${esc(m.name)}${m.id === Server.account?.id ? " · you" : ""}</div><div class="t-sub">${esc(m.role)} · ${m.online ? "online" : "offline"}</div></span>`;
+            list.append(r);
+          }
+        };
+        paintMembers(Server.members);
+        Server.loadMembers(org.id).then(paintMembers).catch(() => list.replaceChildren(el("div", "set-sub", "Could not reach the directory.")));
+        og.append(memRow);
+
+        const invRow = el("div", "set-row");
+        invRow.innerHTML = `<div><div class="set-label">Invite someone</div><div class="set-sub">They enter this code when they create their account.</div></div>`;
+        const codeBox = el("span", "invite-code", "····-····-····");
+        const copy = el("button", "rail-item", "Copy");
+        copy.style.cssText = "width:auto;background:var(--pane-bg);border:1px solid var(--pane-edge)";
+        copy.addEventListener("click", async () => {
+          try { await navigator.clipboard.writeText(codeBox.textContent); copy.textContent = "Copied"; setTimeout(() => (copy.textContent = "Copy"), 1200); }
+          catch { const r = document.createRange(); r.selectNode(codeBox); getSelection().removeAllRanges(); getSelection().addRange(r); }
+        });
+        const wrap = el("div");
+        wrap.style.cssText = "display:flex;gap:8px;align-items:center";
+        wrap.append(codeBox, copy);
+        invRow.append(wrap);
+        og.append(invRow);
+        Server.invite(org.id).then((r) => { codeBox.textContent = r.code; }).catch(() => { codeBox.textContent = "unavailable"; });
+
+        og.append(el("div", "mono rail-foot", "THE SERVER SEES NAMES, PUBLIC KEYS AND MEMBERSHIP.<br>IT NEVER SEES MESSAGE PLAINTEXT — THAT STAYS SEALED END-TO-END."));
+      }
+      scroll.append(og);
+
       // network
       const nw = el("div", "pane set-section");
       nw.append(el("div", "set-title", "Dark Core"));
@@ -2417,6 +2687,8 @@ const Mobile = {
     const greet = h < 12 ? "morning" : h < 18 ? "afternoon" : "evening";
     const unread = Chat.totalUnread();
     const nodes = Mesh.activeCount();
+    // the board loads asynchronously — never index into it blind
+    const panes = (Board.cols || []).reduce((n, c) => n + (c.cards ? c.cards.length : 0), 0);
     const wrap = el("section", "content");
     const scroll = el("div", "content-scroll m-home");
     scroll.innerHTML = `
@@ -2433,8 +2705,8 @@ const Mobile = {
       </div>
       <div class="pane" data-go="boards">
         <div class="mono kicker">ACTIVE PROJECT</div>
-        <div class="stat-n">Friday 1.0</div>
-        <div class="set-sub">${Board.cols[1].cards.length} panes in progress · ${Board.cols[2].cards.length} in review</div>
+        <div class="stat-n">${panes} pane${panes === 1 ? "" : "s"}</div>
+        <div class="set-sub">${Server.org() ? esc(Server.org().name) : "Across the mesh"} · synced live</div>
       </div>
       <div class="pane" data-go="ledger">
         <div class="mono kicker">LEDGER</div>
@@ -2514,8 +2786,22 @@ const Auth = {
           const ok = await Account.unlock(pass.value);
           if (!ok) { err.textContent = "Wrong passphrase — cannot decrypt."; btn.textContent = "Unlock"; btn.disabled = false; pass.select(); return; }
         }
+        // an org server is optional; if one is reachable, sign in to it and
+        // make sure this account belongs somewhere before the desktop opens
+        btn.textContent = "Connecting…";
+        let needsOrg = false;
+        if (await Server.probe()) {
+          try {
+            await Server.authenticate();
+            needsOrg = !Server.orgs.length;
+          } catch { /* server had a bad day — carry on peer-to-peer */ }
+        }
         veil.classList.add("done");
-        setTimeout(() => { veil.remove(); onUnlock(); }, 360);
+        setTimeout(() => {
+          veil.remove();
+          if (needsOrg) this.orgStep(onUnlock);
+          else { Server.connect(); onUnlock(); }
+        }, 360);
       } catch (ex) { err.textContent = "Something went wrong. Try again."; btn.disabled = false; btn.textContent = mode === "in" ? "Unlock" : "Create account"; }
     });
 
@@ -2523,11 +2809,81 @@ const Auth = {
       if (confirm("Forget this account on this device? The encrypted vault is deleted and cannot be recovered without your passphrase.")) Account.destroy();
     });
   },
+
+  /* create an org, or join one with an invite code */
+  orgStep(done) {
+    const veil = el("div", "lock-veil");
+    veil.innerHTML = `
+      <div class="lock-card glass" style="width:420px">
+        <img src="assets/logo.svg" alt="" width="60" height="60">
+        <div class="lock-title h-display">Your organization<em>.</em></div>
+        <div class="lock-sub mono">EROS OFFICE · ${esc(Account.name || "")}</div>
+        <div class="org-tabs" role="tablist">
+          <button class="org-tab on" id="t-join" role="tab" aria-selected="true">Join an org</button>
+          <button class="org-tab" id="t-make" role="tab" aria-selected="false">Create one</button>
+        </div>
+        <form class="lock-form" autocomplete="off">
+          <div id="org-pane"></div>
+          <div class="lock-err" id="o-err"></div>
+          <button class="lock-btn" type="submit" id="o-go">Join</button>
+        </form>
+        <div class="lock-foot mono"><button class="lock-link" id="o-skip">Skip — use Friday on this device only</button></div>
+      </div>`;
+    document.body.append(veil);
+    const pane = veil.querySelector("#org-pane");
+    const err = veil.querySelector("#o-err");
+    const go = veil.querySelector("#o-go");
+    let mode = "join";
+
+    const paint = () => {
+      pane.innerHTML = mode === "join"
+        ? `<input class="lock-in" id="o-code" placeholder="Invite code — ABCD-EFGH-JKMN" autocomplete="off" spellcheck="false" style="text-transform:uppercase">
+           <div class="set-sub" style="text-align:left;margin-top:2px">Ask a member for a code. Joining shares your name and public key with that org.</div>`
+        : `<input class="lock-in" id="o-name" placeholder="Organization name" autocomplete="off">
+           <div class="set-sub" style="text-align:left;margin-top:2px">You'll be the owner, and get an invite code to hand out.</div>`;
+      go.textContent = mode === "join" ? "Join" : "Create organization";
+      veil.querySelector("#t-join").classList.toggle("on", mode === "join");
+      veil.querySelector("#t-make").classList.toggle("on", mode === "make");
+      veil.querySelector("#t-join").setAttribute("aria-selected", String(mode === "join"));
+      veil.querySelector("#t-make").setAttribute("aria-selected", String(mode === "make"));
+      pane.querySelector("input").focus();
+    };
+    veil.querySelector("#t-join").addEventListener("click", () => { mode = "join"; err.textContent = ""; paint(); });
+    veil.querySelector("#t-make").addEventListener("click", () => { mode = "make"; err.textContent = ""; paint(); });
+    paint();
+
+    const finish = () => { veil.classList.add("done"); setTimeout(() => { veil.remove(); Server.connect(); done(); }, 360); };
+
+    veil.querySelector(".lock-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.textContent = ""; go.disabled = true;
+      const label = go.textContent;
+      try {
+        if (mode === "join") {
+          const code = veil.querySelector("#o-code").value.trim().toUpperCase();
+          if (!code) { err.textContent = "Enter the invite code."; go.disabled = false; return; }
+          go.textContent = "Joining…";
+          await Server.joinOrg(code);
+        } else {
+          const name = veil.querySelector("#o-name").value.trim();
+          if (!name) { err.textContent = "Name the organization."; go.disabled = false; return; }
+          go.textContent = "Creating…";
+          await Server.createOrg(name);
+        }
+        finish();
+      } catch (ex) {
+        err.textContent = String(ex.message || ex);
+        go.disabled = false; go.textContent = label;
+      }
+    });
+    veil.querySelector("#o-skip").addEventListener("click", finish);
+  },
 };
 
 function bootApp() {
   Net.start();   // join the real Dark Core mesh with the account identity
   Call.init();   // always listen for incoming sealed voice calls, app open or not
+  if (Server.org()) Server.loadMembers(Server.org().id).catch(() => {});
 
   if (pocket.matches) {
     Mobile.build();
