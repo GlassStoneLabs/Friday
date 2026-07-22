@@ -25,8 +25,8 @@ for pair in "arm64:arm64-apple-macos12.0" "x86_64:x86_64-apple-macos12.0"; do
   fi
   out="$HERE/build/friday-$arch"
   xcrun --sdk macosx swiftc -O -target "$triple" \
-    -framework AppKit -framework WebKit -framework Network \
-    Sources/*.swift -o "$out"
+    -framework AppKit -framework WebKit -framework Network -framework MultipeerConnectivity \
+    Sources/main.swift Sources/LocalServer.swift Sources/RelayStore.swift Sources/MeshTransport.swift Sources/MeshBridge.swift -o "$out"
   SLICES+=("$out")
 done
 if [ "${#SLICES[@]}" -gt 1 ]; then
@@ -70,6 +70,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHumanReadableCopyright</key><string>Eros Office · Glass Stone LLC</string>
   <key>NSMicrophoneUsageDescription</key><string>Friday uses the microphone for encrypted Dark Sun voice calls over the mesh.</string>
   <key>NSCameraUsageDescription</key><string>Friday uses the camera only if you start a video call.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>Friday connects to nearby devices to form its encrypted mesh and relay for them off the grid.</string>
+  <key>NSBonjourServices</key><array><string>_friday-mesh._tcp</string><string>_friday-mesh._udp</string></array>
   <key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
 </dict></plist>
 PLIST

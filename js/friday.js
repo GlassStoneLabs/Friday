@@ -371,7 +371,9 @@ Apps.mesh = {
     rail.append(el("div", "mono rail-head", "THIS NODE"));
     const meBox = el("div", "pane");
     meBox.style.padding = "10px 13px";
-    meBox.innerHTML = `<div class="t-name">${esc(Net.name)}</div><div class="t-sub mono" style="word-break:break-all">${Net.id.slice(0, 18)}</div>`;
+    const offgrid = !!window.FridayNativeMesh?.available;
+    meBox.innerHTML = `<div class="t-name">${esc(Net.name)}</div><div class="t-sub mono" style="word-break:break-all">${Net.id.slice(0, 18)}</div>`
+      + (offgrid ? `<div class="transport" style="margin-top:8px"><span class="t-dot"></span><span><div class="t-name">Off-grid relay · active</div><div class="t-sub">MultipeerConnectivity · Wi-Fi + Bluetooth · store &amp; forward</div></span></div>` : "");
     rail.append(meBox);
 
     rail.append(el("div", "mono rail-head", "LIVE PEERS"));
@@ -383,7 +385,7 @@ Apps.mesh = {
     link.style.cssText = "width:auto;margin-top:10px;background:color-mix(in srgb,var(--accent) 14%,transparent)";
     link.textContent = "Link a device →";
     link.addEventListener("click", () => Net.linkDialog());
-    rail.append(link, el("div", "mono rail-foot", "BROADCASTCHANNEL + WEBRTC<br>X25519 · HKDF · AES-256-GCM<br>NO SERVER · REAL PEERS ONLY"));
+    rail.append(link, el("div", "mono rail-foot", (offgrid ? "OFF-GRID: MULTIPEER RELAY + " : "") + "BROADCASTCHANNEL + WEBRTC<br>X25519 · HKDF · AES-256-GCM<br>NO SERVER · REAL PEERS ONLY"));
     body.append(wrap, rail);
 
     const drawPeers = () => {
@@ -925,11 +927,13 @@ const Net = {
     const s = JSON.stringify(obj);
     try { this.bc?.postMessage(obj); } catch {}
     for (const ch of this.rtc.values()) { try { if (ch.readyState === "open") ch.send(s); } catch {} }
+    // native off-grid mesh (iOS/iPad/Mac apps): the device relays + stores this
+    try { window.FridayNativeMesh?.available && FridayNativeMesh.send(obj); } catch {}
   },
   sendTo(id, obj) {
     const ch = this.rtc.get(id);
     if (ch && ch.readyState === "open") { try { ch.send(JSON.stringify(obj)); return; } catch {} }
-    this.send(obj); // BroadcastChannel reaches same-origin tabs; recipients filter by .to
+    this.send(obj); // BroadcastChannel + native mesh reach peers; recipients filter by .to
   },
 
   recv(m, transport) {
@@ -1129,6 +1133,8 @@ const Net = {
   },
   _host() { return document.querySelector(".window.focused") || document.getElementById("m-surface") || document.body; },
 };
+// the native mesh bridge (iOS/iPad/Mac apps) reaches Net through the window
+try { window.Net = Net; } catch {}
 
 /* ---------------- Messages (REAL delivery over Net) ----------------
    # dark-core is the broadcast room of every live node. Each real peer

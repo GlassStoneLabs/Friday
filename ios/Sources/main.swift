@@ -12,9 +12,10 @@ import WebKit
 
 let FIXED_PORT: UInt16 = 47821   // stable origin ⇒ saved logins persist across launches
 
-final class FridayViewController: UIViewController, WKUIDelegate, WKNavigationDelegate {
+final class FridayViewController: UIViewController, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     private var webView: WKWebView!
     private var server: LocalServer!
+    private var mesh: MeshTransport!
 
     override func loadView() {
         // web assets are bundled under Resources/web
@@ -31,6 +32,12 @@ final class FridayViewController: UIViewController, WKUIDelegate, WKNavigationDe
         config.mediaTypesRequiringUserActionForPlayback = []
         config.defaultWebpagePreferences.allowsContentJavaScript = true
 
+        // native mesh bridge: expose window.FridayNativeMesh + the relay transport
+        let ucc = WKUserContentController()
+        ucc.add(self, name: "mesh")
+        ucc.addUserScript(WKUserScript(source: MeshBridge.shim, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        config.userContentController = ucc
+
         webView = WKWebView(frame: .zero, configuration: config)
         webView.uiDelegate = self
         webView.navigationDelegate = self
@@ -43,8 +50,28 @@ final class FridayViewController: UIViewController, WKUIDelegate, WKNavigationDe
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        // start relaying on the off-grid mesh (Wi-Fi + Bluetooth, no server)
+        mesh = MeshTransport(displayName: UIDevice.current.name)
+        mesh.onFrame = { [weak self] payload in
+            DispatchQueue.main.async { self?.webView.evaluateJavaScript("window.FridayNativeMesh && FridayNativeMesh.recv(\(payload))", completionHandler: nil) }
+        }
+        mesh.onPeersChanged = { [weak self] names in
+            let json = (try? JSONSerialization.data(withJSONObject: names)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+            DispatchQueue.main.async { self?.webView.evaluateJavaScript("window.FridayNativeMesh && FridayNativeMesh.peers(\(json))", completionHandler: nil) }
+        }
+        mesh.start()
+
         let url = URL(string: "http://127.0.0.1:\(server.port)/")!
         webView.load(URLRequest(url: url))
+    }
+
+    // frames from the web app → onto the mesh
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "mesh" else { return }
+        if let payload = message.body as? String { mesh.send(payload: payload) }
+        else if let obj = message.body as? [String: Any],
+                let data = try? JSONSerialization.data(withJSONObject: obj),
+                let s = String(data: data, encoding: .utf8) { mesh.send(payload: s) }
     }
 
     override var preferredStatusBarStyle: UIStatusBarStyle { .default }

@@ -36,6 +36,29 @@ Copy the web app (`index.html`, `css/`, `js/`, `assets/`, `sw.js`,
 `Info.plist` keys from `build-sim.sh` (device family 1 & 2, mic/camera/local-
 network usage strings), set your bundle id + team, and build to the device.
 
+## Off-grid mesh — store, transmit, relay
+
+Each app is a real mesh node. The native side runs **MultipeerConnectivity**
+(peer discovery + encrypted transport over Wi-Fi, peer-to-peer Wi-Fi, and
+Bluetooth — no server, no internet) and bridges it into the web app's `Net`
+layer as another transport alongside BroadcastChannel and WebRTC.
+
+- **Transmit** — the app's frames (presence, messages, typing…) are carried
+  between nearby devices with no infrastructure.
+- **Relay** — a device re-broadcasts frames it hasn't seen before, with a hop
+  count, so A reaches C through B (multi-hop flooding, de-duplicated).
+- **Store & forward** — recent frames are held briefly and replayed to a peer
+  that connects a moment later, so a device that was away still receives them.
+
+The relay engine (`mac/Sources/RelayStore.swift`) is transport-agnostic and
+unit-tested: `swiftc mac/Sources/RelayStore.swift mac/Tests/RelayStoreTests.swift -o /tmp/rt && /tmp/rt`.
+Message content is never inspected by the mesh — it stays sealed end-to-end
+between the web endpoints.
+
+> Live device-to-device discovery uses real Wi-Fi/Bluetooth radios, so it must
+> be exercised on **physical devices** (the Simulator doesn't emulate them). The
+> relay logic and the web↔native bridge are verified without hardware.
+
 ## Notes
 
 - **Stable origin.** The app prefers a fixed loopback port so the WebView's

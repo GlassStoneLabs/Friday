@@ -8,7 +8,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 HERE="$(pwd)"
 WEB="$(cd .. && pwd)"
-SHARED="$WEB/mac/Sources/LocalServer.swift"   # the loopback server is shared with the Mac app
+# shared native sources (loopback server + off-grid mesh relay), also used by the Mac app
+SHARED=("$WEB/mac/Sources/LocalServer.swift" "$WEB/mac/Sources/RelayStore.swift" "$WEB/mac/Sources/MeshTransport.swift" "$WEB/mac/Sources/MeshBridge.swift")
 APP="$HERE/build/Friday.app"
 BUNDLE_ID="com.glassstone.friday"
 VERSION="1.0.0"
@@ -25,8 +26,8 @@ for pair in "arm64:arm64-apple-ios${MIN_IOS}-simulator" "x86_64:x86_64-apple-ios
   arch="${pair%%:*}"; triple="${pair##*:}"
   out="$HERE/build/friday-$arch"
   if xcrun --sdk iphonesimulator swiftc -O -sdk "$SDK" -target "$triple" \
-       -framework UIKit -framework WebKit -framework Network \
-       Sources/main.swift "$SHARED" -o "$out" 2>/dev/null; then
+       -framework UIKit -framework WebKit -framework Network -framework MultipeerConnectivity \
+       Sources/main.swift "${SHARED[@]}" -o "$out" 2>/tmp/friday-ios-build.log; then
     SLICES+=("$out")
   else
     echo "  (skipping $arch slice — not targetable here)"
@@ -85,7 +86,8 @@ cat > "$APP/Info.plist" <<PLIST
     <string>UIInterfaceOrientationLandscapeRight</string></array>
   <key>NSMicrophoneUsageDescription</key><string>Friday uses the microphone for encrypted Dark Sun voice calls over the mesh.</string>
   <key>NSCameraUsageDescription</key><string>Friday uses the camera only if you start a video call.</string>
-  <key>NSLocalNetworkUsageDescription</key><string>Friday connects to nearby devices to form its encrypted mesh.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>Friday connects to nearby devices to form its encrypted mesh and relay for them off the grid.</string>
+  <key>NSBonjourServices</key><array><string>_friday-mesh._tcp</string><string>_friday-mesh._udp</string></array>
   <key>CFBundleSupportedPlatforms</key><array><string>iPhoneSimulator</string></array>
   <key>DTPlatformName</key><string>iphonesimulator</string>
   $ICON_KEYS

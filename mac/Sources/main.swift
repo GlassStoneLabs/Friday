@@ -11,10 +11,11 @@ import WebKit
 
 let FIXED_PORT: UInt16 = 47821   // stable origin ⇒ your saved logins persist across launches
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     var window: NSWindow!
     var webView: WKWebView!
     var server: LocalServer!
+    var mesh: MeshTransport!
 
     func applicationDidFinishLaunching(_ note: Notification) {
         // web assets are bundled under Resources/web
@@ -30,6 +31,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         config.mediaTypesRequiringUserActionForPlayback = []
         config.preferences.setValue(true, forKey: "developerExtrasEnabled") // right-click ▸ Inspect Element
+
+        // native off-grid mesh bridge — this Mac relays + stores for its peers
+        let ucc = WKUserContentController()
+        ucc.add(self, name: "mesh")
+        ucc.addUserScript(WKUserScript(source: MeshBridge.shim, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        config.userContentController = ucc
 
         webView = WKWebView(frame: .zero, configuration: config)
         webView.uiDelegate = self
@@ -54,12 +61,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         buildMenu()
         NSApp.activate(ignoringOtherApps: true)
 
+        // start relaying on the off-grid mesh (Wi-Fi + Bluetooth, no server)
+        mesh = MeshTransport(displayName: Host.current().localizedName ?? "Friday Mac")
+        mesh.onFrame = { [weak self] payload in
+            DispatchQueue.main.async { self?.webView.evaluateJavaScript("window.FridayNativeMesh && FridayNativeMesh.recv(\(payload))", completionHandler: nil) }
+        }
+        mesh.onPeersChanged = { [weak self] names in
+            let json = (try? JSONSerialization.data(withJSONObject: names)).flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+            DispatchQueue.main.async { self?.webView.evaluateJavaScript("window.FridayNativeMesh && FridayNativeMesh.peers(\(json))", completionHandler: nil) }
+        }
+        mesh.start()
+
         let url = URL(string: "http://127.0.0.1:\(server.port)/")!
         webView.load(URLRequest(url: url))
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
-    func applicationWillTerminate(_ note: Notification) { server?.stop() }
+    func applicationWillTerminate(_ note: Notification) { mesh?.stop(); server?.stop() }
+
+    // frames from the web app → onto the mesh
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "mesh" else { return }
+        if let payload = message.body as? String { mesh.send(payload: payload) }
+        else if let obj = message.body as? [String: Any],
+                let data = try? JSONSerialization.data(withJSONObject: obj),
+                let s = String(data: data, encoding: .utf8) { mesh.send(payload: s) }
+    }
 
     // grant camera/mic to our own bundled origin (Calls · Dark Sun voice)
     @available(macOS 12.0, *)
