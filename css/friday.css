@@ -632,6 +632,39 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .lock-btn:hover { transform: translateY(-1px); }
 .lock-btn:disabled { opacity: .6; }
+/* the logins page — every account this device remembers */
+.login-list { display: flex; flex-direction: column; gap: 6px; width: 100%; margin: 10px 0 2px; }
+.login-row { display: flex; align-items: center; gap: 6px; }
+.login-pick {
+  flex: 1; display: flex; align-items: center; gap: 11px; min-height: 56px;
+  padding: 8px 12px; border-radius: 13px; text-align: left;
+  background: var(--pane-bg); border: 1px solid var(--pane-edge);
+  transition: background var(--t-hover) var(--ease), transform var(--t-hover) var(--ease);
+}
+.login-pick:hover { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.login-pick:active { transform: scale(0.995); }
+.login-ini {
+  width: 34px; height: 34px; flex: 0 0 34px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 12px; font-weight: 600;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.login-ini.big { width: 60px; height: 60px; font-size: 20px; font-family: var(--font-display); margin-bottom: 6px; }
+.login-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.login-name { font-weight: 600; font-size: 13.5px; }
+.login-sub { font-size: 7.5px; color: var(--muted); letter-spacing: .14em; }
+.login-forget {
+  width: 30px; height: 30px; flex: 0 0 30px; border-radius: 50%;
+  color: var(--muted); font-size: 17px; line-height: 1;
+  opacity: 0; transition: opacity var(--t-hover) var(--ease), color var(--t-hover) var(--ease);
+}
+.login-row:hover .login-forget, .login-forget:focus-visible { opacity: 1; }
+.login-forget:hover { color: var(--carmine); background: color-mix(in srgb, var(--carmine) 12%, transparent); }
+.lock-check {
+  display: flex; align-items: center; gap: 8px; padding: 2px;
+  font-size: 12px; color: var(--muted); cursor: pointer; text-align: left;
+}
+.lock-check input { accent-color: var(--accent); width: 15px; height: 15px; }
+
 .org-tabs { display: flex; gap: 3px; padding: 3px; margin: 4px 0 12px; border-radius: 11px; background: color-mix(in srgb, var(--body) 7%, transparent); width: 100%; }
 .org-tabs .org-tab {
   flex: 1; padding: 7px 10px; border-radius: 9px; font-size: 12.5px; font-weight: 600;

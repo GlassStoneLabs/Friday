@@ -478,16 +478,102 @@ const E2E = {
    key are never stored — a wrong passphrase simply fails GCM authentication
    and cannot decrypt. Everything sensitive is encrypted at rest in this
    browser; nothing leaves the device. */
+/* ---------------- Remember · staying signed in on a trusted device ----------
+   The passphrase is never stored — not in any form. What we keep is the
+   derived AES-GCM key itself, and only because WebCrypto lets us keep it
+   NON-EXTRACTABLE: IndexedDB will hold the CryptoKey and hand it back for
+   decryption, but no script (ours or anyone's) can read its bytes out again.
+   The honest trade-off, said plainly in the UI: while a login is remembered,
+   anyone who can open this browser profile can open that account. */
+const Remember = {
+  DB: "friday.keys", STORE: "vaultKeys",
+  open() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open(this.DB, 1);
+      r.onupgradeneeded = () => { if (!r.result.objectStoreNames.contains(this.STORE)) r.result.createObjectStore(this.STORE); };
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+  },
+  async put(id, key) {
+    try {
+      const db = await this.open();
+      await new Promise((res, rej) => {
+        const tx = db.transaction(this.STORE, "readwrite");
+        tx.objectStore(this.STORE).put(key, id);
+        tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+      });
+      db.close();
+      return true;
+    } catch { return false; }
+  },
+  async get(id) {
+    try {
+      const db = await this.open();
+      const key = await new Promise((res, rej) => {
+        const tx = db.transaction(this.STORE, "readonly");
+        const rq = tx.objectStore(this.STORE).get(id);
+        rq.onsuccess = () => res(rq.result || null); rq.onerror = () => rej(rq.error);
+      });
+      db.close();
+      return key;
+    } catch { return null; }
+  },
+  async drop(id) {
+    if (!id) return;
+    try {
+      const db = await this.open();
+      await new Promise((res) => {
+        const tx = db.transaction(this.STORE, "readwrite");
+        tx.objectStore(this.STORE).delete(id);
+        tx.oncomplete = res; tx.onerror = res;
+      });
+      db.close();
+    } catch {}
+  },
+};
+
 const Account = {
-  KEY: "friday.account.v1",
+  OLD_KEY: "friday.account.v1",     // the single-login era, migrated on sight
+  INDEX: "friday.logins.v1",        // [{ id, name, created, lastUsed, remembered }]
+  vaultKey: (id) => "friday.vault." + id,
   ITERS: 310000,
   identity: null,   // { priv, pub, pubRaw, alg }
+  id: null,
   name: null,
   unlocked: false,
   store: {},        // decrypted, in-memory "encrypted pages" (profile, notes…)
 
-  exists() { try { return !!localStorage.getItem(this.KEY); } catch { return false; } },
-  meta() { try { return JSON.parse(localStorage.getItem(this.KEY)); } catch { return null; } },
+  /* ---- the list of logins this device remembers (names only; vaults stay sealed) ---- */
+  logins() {
+    let list = [];
+    try { list = JSON.parse(localStorage.getItem(this.INDEX) || "[]"); } catch {}
+    // migrate a pre-multi-login vault so nobody loses their account
+    try {
+      const old = localStorage.getItem(this.OLD_KEY);
+      if (old) {
+        const meta = JSON.parse(old);
+        const id = "l-" + Math.random().toString(36).slice(2, 10);
+        localStorage.setItem(this.vaultKey(id), old);
+        localStorage.removeItem(this.OLD_KEY);
+        list.push({ id, name: meta.name || "Account", created: Date.now(), lastUsed: Date.now() });
+        localStorage.setItem(this.INDEX, JSON.stringify(list));
+      }
+    } catch {}
+    return list.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0));
+  },
+  exists() { return this.logins().length > 0; },
+  meta(id) { try { return JSON.parse(localStorage.getItem(this.vaultKey(id))); } catch { return null; } },
+  putIndex(list) { try { localStorage.setItem(this.INDEX, JSON.stringify(list)); } catch {} },
+  touch(id, patch) {
+    const list = this.logins().map((l) => (l.id === id ? { ...l, lastUsed: Date.now(), ...patch } : l));
+    this.putIndex(list);
+  },
+  forget(id) {
+    this.putIndex(this.logins().filter((l) => l.id !== id));
+    try { localStorage.removeItem(this.vaultKey(id)); } catch {}
+    Remember.drop(id);
+  },
 
   async deriveKey(pass, salt) {
     const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pass), "PBKDF2", false, ["deriveKey"]);
@@ -496,12 +582,12 @@ const Account = {
       base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
   },
 
-  async writeVault(vault, pass, saltB64) {
-    const salt = saltB64 ? unb64(saltB64) : crypto.getRandomValues(new Uint8Array(16));
+  async writeVault(id, vault, pass) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
     const key = await this.deriveKey(pass, salt);
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(JSON.stringify(vault))));
-    localStorage.setItem(this.KEY, JSON.stringify({ v: 1, name: vault.name, salt: b64(salt), iters: this.ITERS, iv: b64(iv), ct: b64(ct) }));
+    localStorage.setItem(this.vaultKey(id), JSON.stringify({ v: 2, name: vault.name, salt: b64(salt), iters: this.ITERS, iv: b64(iv), ct: b64(ct) }));
     this._key = key; this._salt = salt;
   },
 
@@ -518,8 +604,14 @@ const Account = {
       name, alg, privJwk, pubRaw: b64(pubRaw), createdAt: Date.now(), store: {},
       signAlg: sign.alg, signPrivJwk: sign.privJwk, signPubJwk: sign.pubJwk,
     };
-    await this.writeVault(vault, pass);
+    const id = "l-" + Math.random().toString(36).slice(2, 10);
+    await this.writeVault(id, vault, pass);
+    const list = this.logins();
+    list.push({ id, name, created: Date.now(), lastUsed: Date.now() });
+    this.putIndex(list);
+    this.id = id;
     await this.activate(vault);
+    return id;
   },
 
   async makeSigningKey() {
@@ -549,8 +641,8 @@ const Account = {
     return b64(new Uint8Array(await crypto.subtle.sign(params, this.signPriv, data)));
   },
 
-  async unlock(pass) {
-    const o = this.meta();
+  async unlock(id, pass) {
+    const o = this.meta(id);
     if (!o) return false;
     let vault;
     try {
@@ -558,6 +650,23 @@ const Account = {
       vault = JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(o.iv) }, key, unb64(o.ct))));
       this._key = key; this._salt = unb64(o.salt);
     } catch { return false; }   // wrong passphrase → GCM auth fails
+    this.id = id;
+    this.touch(id, {});
+    await this.activate(vault);
+    return true;
+  },
+
+  // open a login whose key this device is holding for us (no passphrase typed)
+  async unlockWithKey(id, key) {
+    const o = this.meta(id);
+    if (!o) return false;
+    let vault;
+    try {
+      vault = JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: unb64(o.iv) }, key, unb64(o.ct))));
+    } catch { return false; }
+    this._key = key; this._salt = unb64(o.salt);
+    this.id = id;
+    this.touch(id, {});
     await this.activate(vault);
     return true;
   },
@@ -588,16 +697,20 @@ const Account = {
 
   // persist an "encrypted page" of app data back into the vault
   async save(patch) {
-    if (!this.unlocked || !this._key) return;
+    if (!this.unlocked || !this._key || !this.id) return;
     Object.assign(this.store, patch);
     this.vault.store = this.store;
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, this._key, new TextEncoder().encode(JSON.stringify(this.vault))));
-    localStorage.setItem(this.KEY, JSON.stringify({ v: 1, name: this.vault.name, salt: b64(this._salt), iters: this.ITERS, iv: b64(iv), ct: b64(ct) }));
+    try {
+      localStorage.setItem(this.vaultKey(this.id), JSON.stringify({ v: 2, name: this.vault.name, salt: b64(this._salt), iters: this.ITERS, iv: b64(iv), ct: b64(ct) }));
+    } catch (e) { console.warn("vault save failed (storage full?)", e); }
   },
 
-  lock() { this.unlocked = false; this.identity = null; this._key = null; this.store = {}; location.reload(); },
-  destroy() { try { localStorage.removeItem(this.KEY); } catch {} location.reload(); },
+  // both land on the login picker, never silently re-open a remembered account
+  lock() { Remember.drop(this.id); try { sessionStorage.setItem("friday.switch", "1"); } catch {} this.unlocked = false; this.identity = null; this._key = null; this.store = {}; location.reload(); },
+  signOut() { try { sessionStorage.setItem("friday.switch", "1"); } catch {} this.unlocked = false; this.identity = null; this._key = null; this.store = {}; location.reload(); },
+  destroy() { if (this.id) this.forget(this.id); location.reload(); },
 
   shortId() {
     // a stable node id derived from the identity public key
@@ -2235,16 +2348,45 @@ Apps.settings = {
         fpRow.innerHTML = `<div><div class="set-label">Identity fingerprint</div><div class="set-sub mono" id="acct-fp">computing…</div></div>`;
         pf.append(fpRow);
         E2E.fingerprint(Account.identity.pubRaw, Account.identity.pubRaw).then((fp) => { const e = scroll.querySelector("#acct-fp"); if (e) e.textContent = fp; });
+        // staying signed in — an explicit, reversible trade
+        const me = Account.logins().find((l) => l.id === Account.id);
+        const remRow = el("div", "set-row");
+        remRow.innerHTML = `<div><div class="set-label">Keep me signed in on this device</div><div class="set-sub">Holds this vault's key here so Friday opens without the passphrase. Anyone who can open this browser profile can then open this account. Your passphrase is never stored either way.</div></div>`;
+        const remSw = el("button", "switch" + (me?.remembered ? " on" : ""));
+        remSw.setAttribute("role", "switch");
+        remSw.setAttribute("aria-checked", String(!!me?.remembered));
+        remSw.addEventListener("click", async () => {
+          const on = !remSw.classList.contains("on");
+          if (on) {
+            const kept = await Remember.put(Account.id, Account._key);
+            Account.touch(Account.id, { remembered: kept });
+            if (!kept) return;
+          } else {
+            await Remember.drop(Account.id);
+            Account.touch(Account.id, { remembered: false });
+          }
+          remSw.classList.toggle("on", on);
+          remSw.setAttribute("aria-checked", String(on));
+        });
+        remRow.append(remSw);
+        pf.append(remRow);
+
         const acts = el("div", "set-row");
-        acts.style.gap = "10px";
+        acts.style.cssText = "gap:10px;flex-wrap:wrap";
         const lock = el("button", "rail-item", "Lock now");
         lock.style.cssText = "width:auto;background:color-mix(in srgb,var(--accent) 14%,transparent)";
         lock.addEventListener("click", () => Account.lock());
-        const out = el("button", "rail-item", "Sign out & erase vault");
+        const switcher = el("button", "rail-item", "Switch login…");
+        switcher.style.cssText = "width:auto;background:var(--pane-bg);border:1px solid var(--pane-edge)";
+        switcher.addEventListener("click", () => Account.signOut());
+        const out = el("button", "rail-item", "Forget this login");
         out.style.cssText = "width:auto;background:var(--pane-bg);border:1px solid var(--pane-edge)";
-        out.addEventListener("click", () => { if (confirm("Erase the encrypted vault on this device? It cannot be recovered.")) Account.destroy(); });
-        acts.append(lock, out);
+        out.addEventListener("click", () => { if (confirm("Forget this login on this device?\n\nIts encrypted vault is deleted and cannot be recovered without the passphrase.")) Account.destroy(); });
+        acts.append(lock, switcher, out);
         pf.append(acts);
+
+        const others = Account.logins().filter((l) => l.id !== Account.id);
+        if (others.length) pf.append(el("div", "set-sub", `${others.length} other login${others.length === 1 ? "" : "s"} remembered on this device: ${others.map((l) => esc(l.name)).join(", ")}.`));
       } else {
         pf.append(el("div", "set-sub", E2E.ok ? "No account on this device." : "Encryption unavailable — serve over https or localhost to enable accounts."));
       }
@@ -2399,6 +2541,7 @@ const MenuBar = {
         ["Toggle Appearance", () => { State.theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark"; applyState(); }, "⇧ ⌘ D"],
         ["sep"],
         ...(Account.unlocked ? [["Lock Friday", () => Account.lock(), "⌃ ⌘ Q"]] : []),
+        ...(Account.unlocked ? [["Switch login…", () => Account.signOut()]] : []),
         ["Restart Friday", () => location.reload()],
       ];
       case "File": return [
@@ -2741,73 +2884,179 @@ pocket.addEventListener("change", () => location.reload());
    AUTH GATE · the encrypted lock screen
    ============================================================ */
 const Auth = {
-  gate(onUnlock) {
+  initials(name) { return (name || "?").split(/\s+/).filter((w) => /\w/.test(w)).map((w) => w[0]).join("").slice(0, 2).toUpperCase() || "··"; },
+  ago(t) {
+    if (!t) return "never";
+    const s = (Date.now() - t) / 1000;
+    if (s < 90) return "just now";
+    if (s < 3600) return `${Math.round(s / 60)} min ago`;
+    if (s < 172800) return `${Math.round(s / 3600)} h ago`;
+    return new Date(t).toLocaleDateString([], { month: "short", day: "numeric" });
+  },
+
+  async gate(onUnlock) {
     // no WebCrypto (insecure context) → can't encrypt; let the user in with a notice.
     // ?guest=1 starts an ephemeral session (fresh keys, nothing persisted) — also the e2e hook.
     if (!E2E.ok || new URLSearchParams(location.search).has("guest")) { onUnlock(); return; }
+    // an explicit "switch login" / "lock" lands on the picker, not straight back in
+    let switching = false;
+    try { switching = sessionStorage.getItem("friday.switch") === "1"; sessionStorage.removeItem("friday.switch"); } catch {}
+    // a login this device is holding the key for opens straight up
+    const remembered = switching ? null : Account.logins().find((l) => l.remembered);
+    if (remembered) {
+      const key = await Remember.get(remembered.id);
+      if (key && await Account.unlockWithKey(remembered.id, key)) return this.afterUnlock(null, onUnlock);
+      if (!key) Account.touch(remembered.id, { remembered: false });   // key went away
+    }
+    const list = Account.logins();
+    if (!list.length) this.createPage(onUnlock);
+    else this.loginsPage(onUnlock);
+  },
+
+  /* ---- the logins page: everyone this device remembers ---- */
+  loginsPage(onUnlock, pick) {
+    const list = Account.logins();
     const veil = el("div", "lock-veil");
-    const mode = Account.exists() ? "in" : "up";
     veil.innerHTML = `
-      <div class="lock-card glass">
-        <img src="assets/logo.svg" alt="" width="68" height="68">
-        <div class="lock-title h-display">${mode === "in" ? "Welcome back<em>.</em>" : "Create your account<em>.</em>"}</div>
-        <div class="lock-sub mono">${mode === "in" ? "EROS OFFICE · ENCRYPTED" : "EROS OFFICE · END-TO-END ENCRYPTED PAGES"}</div>
-        <form class="lock-form" autocomplete="off">
-          ${mode === "up" ? `<input class="lock-in" id="a-name" type="text" placeholder="Display name" autocomplete="off">` : `<div class="lock-name">${esc(Account.meta()?.name || "")}</div>`}
-          <input class="lock-in" id="a-pass" type="password" placeholder="${mode === "up" ? "Choose a passphrase" : "Passphrase"}" autocomplete="${mode === "up" ? "new-password" : "current-password"}">
-          ${mode === "up" ? `<input class="lock-in" id="a-pass2" type="password" placeholder="Confirm passphrase" autocomplete="new-password">` : ``}
-          <div class="lock-err" id="a-err"></div>
-          <button class="lock-btn" type="submit">${mode === "in" ? "Unlock" : "Create account"}</button>
-        </form>
-        <div class="lock-foot mono">${mode === "in"
-          ? `<button class="lock-link" id="a-reset">Forget this account</button>`
-          : `KEYS NEVER LEAVE THIS DEVICE · PBKDF2 · AES-256-GCM`}</div>
+      <div class="lock-card glass" style="width:400px">
+        <img src="assets/logo.svg" alt="" width="60" height="60">
+        <div class="lock-title h-display">Sign in<em>.</em></div>
+        <div class="lock-sub mono">EROS OFFICE · ${list.length} LOGIN${list.length === 1 ? "" : "S"} ON THIS DEVICE</div>
+        <div class="login-list" id="ll" role="list"></div>
+        <div class="lock-foot mono"><button class="lock-link" id="a-add">+ Create another login</button></div>
       </div>`;
     document.body.append(veil);
-    const err = veil.querySelector("#a-err");
-    const pass = veil.querySelector("#a-pass");
-    (veil.querySelector("#a-name") || pass).focus();
+    const ll = veil.querySelector("#ll");
+
+    for (const l of list) {
+      const row = el("div", "login-row");
+      row.setAttribute("role", "listitem");
+      row.innerHTML = `
+        <button class="login-pick" aria-label="Sign in as ${esc(l.name)}">
+          <span class="login-ini">${esc(this.initials(l.name))}</span>
+          <span class="login-meta"><span class="login-name">${esc(l.name)}</span>
+          <span class="login-sub mono">${l.remembered ? "REMEMBERED" : "LAST USED " + esc(this.ago(l.lastUsed)).toUpperCase()}</span></span>
+        </button>
+        <button class="login-forget" aria-label="Forget ${esc(l.name)}" title="Forget this login">×</button>`;
+      row.querySelector(".login-pick").addEventListener("click", () => { veil.remove(); this.unlockPage(l, onUnlock); });
+      row.querySelector(".login-forget").addEventListener("click", () => {
+        if (!confirm(`Forget “${l.name}” on this device?\n\nIts encrypted vault is deleted. Without the passphrase it cannot be recovered — but the account itself still exists in any org it joined.`)) return;
+        Account.forget(l.id);
+        veil.remove();
+        Account.logins().length ? this.loginsPage(onUnlock) : this.createPage(onUnlock);
+      });
+      ll.append(row);
+    }
+    veil.querySelector("#a-add").addEventListener("click", () => { veil.remove(); this.createPage(onUnlock, true); });
+    ll.querySelector(".login-pick")?.focus();
+    if (pick) { const p = list.findIndex((l) => l.id === pick); if (p >= 0) ll.children[p].querySelector(".login-pick").click(); }
+  },
+
+  /* ---- unlock one login ---- */
+  unlockPage(login, onUnlock) {
+    const veil = el("div", "lock-veil");
+    veil.innerHTML = `
+      <div class="lock-card glass">
+        <span class="login-ini big">${esc(this.initials(login.name))}</span>
+        <div class="lock-title h-display" style="font-size:23px">${esc(login.name)}<em>.</em></div>
+        <div class="lock-sub mono">EROS OFFICE · ENCRYPTED VAULT</div>
+        <form class="lock-form" autocomplete="off">
+          <input class="lock-in" id="a-pass" type="password" placeholder="Passphrase" autocomplete="current-password">
+          <label class="lock-check"><input type="checkbox" id="a-remember"> <span>Keep me signed in on this device</span></label>
+          <div class="lock-err" id="a-err"></div>
+          <button class="lock-btn" type="submit">Unlock</button>
+        </form>
+        <div class="lock-foot mono"><button class="lock-link" id="a-back">← All logins</button></div>
+      </div>`;
+    document.body.append(veil);
+    const err = veil.querySelector("#a-err"), pass = veil.querySelector("#a-pass"), btn = veil.querySelector(".lock-btn");
+    pass.focus();
+    veil.querySelector("#a-back").addEventListener("click", () => { veil.remove(); this.loginsPage(onUnlock); });
 
     veil.querySelector(".lock-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       err.textContent = "";
-      const btn = veil.querySelector(".lock-btn");
+      if (!pass.value) { err.textContent = "Enter your passphrase."; return; }
+      btn.textContent = "Unlocking…"; btn.disabled = true;
+      const slow = setTimeout(() => { if (btn.disabled) btn.textContent = "Stretching key…"; }, 900);
       try {
-        if (mode === "up") {
-          const name = veil.querySelector("#a-name").value.trim() || "Operator";
-          const p1 = pass.value, p2 = veil.querySelector("#a-pass2").value;
-          if (p1.length < 8) { err.textContent = "Use at least 8 characters."; return; }
-          if (p1 !== p2) { err.textContent = "Passphrases do not match."; return; }
-          btn.textContent = "Sealing…"; btn.disabled = true;
-          await Account.signup(name, p1);
-        } else {
-          if (!pass.value) { err.textContent = "Enter your passphrase."; return; }
-          btn.textContent = "Unlocking…"; btn.disabled = true;
-          const ok = await Account.unlock(pass.value);
-          if (!ok) { err.textContent = "Wrong passphrase — cannot decrypt."; btn.textContent = "Unlock"; btn.disabled = false; pass.select(); return; }
+        const ok = await Account.unlock(login.id, pass.value);
+        clearTimeout(slow);
+        if (!ok) { err.textContent = "Wrong passphrase — cannot decrypt."; btn.textContent = "Unlock"; btn.disabled = false; pass.select(); return; }
+        if (veil.querySelector("#a-remember").checked) {
+          const kept = await Remember.put(login.id, Account._key);
+          Account.touch(login.id, { remembered: kept });
         }
-        // an org server is optional; if one is reachable, sign in to it and
-        // make sure this account belongs somewhere before the desktop opens
-        btn.textContent = "Connecting…";
-        let needsOrg = false;
-        if (await Server.probe()) {
-          try {
-            await Server.authenticate();
-            needsOrg = !Server.orgs.length;
-          } catch { /* server had a bad day — carry on peer-to-peer */ }
-        }
-        veil.classList.add("done");
-        setTimeout(() => {
-          veil.remove();
-          if (needsOrg) this.orgStep(onUnlock);
-          else { Server.connect(); onUnlock(); }
-        }, 360);
-      } catch (ex) { err.textContent = "Something went wrong. Try again."; btn.disabled = false; btn.textContent = mode === "in" ? "Unlock" : "Create account"; }
+        await this.afterUnlock(veil, onUnlock);
+      } catch (ex) {
+        clearTimeout(slow);
+        err.textContent = "Something went wrong. Try again.";
+        btn.disabled = false; btn.textContent = "Unlock";
+      }
     });
+  },
 
-    veil.querySelector("#a-reset")?.addEventListener("click", () => {
-      if (confirm("Forget this account on this device? The encrypted vault is deleted and cannot be recovered without your passphrase.")) Account.destroy();
+  /* ---- create a new login ---- */
+  createPage(onUnlock, hasOthers) {
+    const veil = el("div", "lock-veil");
+    veil.innerHTML = `
+      <div class="lock-card glass">
+        <img src="assets/logo.svg" alt="" width="68" height="68">
+        <div class="lock-title h-display">Create a login<em>.</em></div>
+        <div class="lock-sub mono">EROS OFFICE · END-TO-END ENCRYPTED PAGES</div>
+        <form class="lock-form" autocomplete="off">
+          <input class="lock-in" id="a-name" type="text" placeholder="Display name" autocomplete="off">
+          <input class="lock-in" id="a-pass" type="password" placeholder="Choose a passphrase" autocomplete="new-password">
+          <input class="lock-in" id="a-pass2" type="password" placeholder="Confirm passphrase" autocomplete="new-password">
+          <label class="lock-check"><input type="checkbox" id="a-remember"> <span>Keep me signed in on this device</span></label>
+          <div class="lock-err" id="a-err"></div>
+          <button class="lock-btn" type="submit">Create login</button>
+        </form>
+        <div class="lock-foot mono">${hasOthers
+          ? `<button class="lock-link" id="a-back">← All logins</button>`
+          : `KEYS NEVER LEAVE THIS DEVICE · PBKDF2 · AES-256-GCM`}</div>
+      </div>`;
+    document.body.append(veil);
+    const err = veil.querySelector("#a-err"), pass = veil.querySelector("#a-pass"), btn = veil.querySelector(".lock-btn");
+    veil.querySelector("#a-name").focus();
+    veil.querySelector("#a-back")?.addEventListener("click", () => { veil.remove(); this.loginsPage(onUnlock); });
+    veil.querySelector("#a-name").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); pass.focus(); } });
+
+    veil.querySelector(".lock-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.textContent = "";
+      const name = veil.querySelector("#a-name").value.trim() || "Operator";
+      const p1 = pass.value, p2 = veil.querySelector("#a-pass2").value;
+      if (p1.length < 8) { err.textContent = "Use at least 8 characters."; return; }
+      if (p1 !== p2) { err.textContent = "Passphrases do not match."; return; }
+      btn.textContent = "Sealing…"; btn.disabled = true;
+      try {
+        const id = await Account.signup(name, p1);
+        if (veil.querySelector("#a-remember").checked) {
+          const kept = await Remember.put(id, Account._key);
+          Account.touch(id, { remembered: kept });
+        }
+        await this.afterUnlock(veil, onUnlock);
+      } catch (ex) {
+        err.textContent = "Something went wrong. Try again.";
+        btn.disabled = false; btn.textContent = "Create login";
+      }
     });
+  },
+
+  /* ---- shared tail: greet the org server, then open the desktop ---- */
+  async afterUnlock(veil, onUnlock) {
+    const btn = veil?.querySelector(".lock-btn");
+    if (btn) btn.textContent = "Connecting…";
+    let needsOrg = false;
+    if (await Server.probe()) {
+      try { await Server.authenticate(); needsOrg = !Server.orgs.length; }
+      catch { /* server had a bad day — carry on peer-to-peer */ }
+    }
+    const go = () => { if (needsOrg) this.orgStep(onUnlock); else { Server.connect(); onUnlock(); } };
+    if (!veil) return go();
+    veil.classList.add("done");
+    setTimeout(() => { veil.remove(); go(); }, 360);
   },
 
   /* create an org, or join one with an invite code */
