@@ -81,6 +81,12 @@ endpoints. Once two devices are introduced, traffic goes **direct** — it does 
 route back through the server. Without a server, the org panel says so plainly and
 the mesh keeps working.
 
+## Documentation
+
+Full manual in [`docs/`](docs/README.md) — 16 pages covering the security model,
+accounts, encryption, the mesh, off-grid relay, the backend API, the surfaces,
+the native apps, the design language, storage, and deployment.
+
 ## Install — pick whichever is easiest
 
 **0 · Just visit the site**
