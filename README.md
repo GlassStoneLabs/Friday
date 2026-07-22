@@ -13,6 +13,18 @@ Hudson palette (Parchment by day, Anthracite by night, Carmine as the
 voice), serif display type, mono maker's marks, and motion that settles
 instead of bouncing.
 
+## Native Mac app
+
+Prefer a real app in your Dock over a browser tab? Build the native macOS version:
+
+```sh
+cd mac && ./build.sh && open build/Friday.app
+```
+
+It's a small **Swift + WKWebView** shell (system WebKit — no Electron, no npm)
+that serves the bundled web app over a loopback secure-context origin, so the
+encryption and mesh all work natively. Details in [`mac/README.md`](mac/README.md).
+
 ## The backend (optional)
 
 Friday works with **no server at all** — the mesh is peer-to-peer. A server adds
