@@ -34,6 +34,23 @@ browser — it only decrypts your local vault.
 | --- | --- |
 | display names, public keys, org membership, who's online, blob sizes/timing | message plaintext, board contents, voice audio, vault files, your passphrase |
 
+### Sign in with Google / Apple / Microsoft (optional)
+
+Social login is **identity only** — it proves who you are so your account and org
+follow you across devices. It does **not** hand your keys to anyone: your mesh keys
+stay in a passphrase-encrypted vault the server (and Google/Apple) can never read.
+After a social login you set a short device passphrase once; that's what keeps your
+data end-to-end encrypted.
+
+To enable it, copy `server/providers.example.json` → `server/providers.json` and
+drop in your OAuth client IDs, then run the server over HTTPS at a real domain
+(`FRIDAY_PUBLIC_URL=https://friday.example.com`). The redirect URI to register with
+each provider is `<public-url>/api/auth/<provider>/callback`. Real OpenID Connect —
+Authorization Code + PKCE, ID tokens verified against the provider's JWKS, no
+dependencies. **With no `providers.json`, no social buttons appear** (nothing is
+faked). One caveat worth stating: signing in with Google/Apple tells them you use
+Friday — the exact metadata this system otherwise avoids.
+
 Everything stays sealed end-to-end (X25519 · HKDF · AES-256-GCM) between the
 endpoints. Once two devices are introduced, traffic goes **direct** — it does not
 route back through the server. Without a server, the org panel says so plainly and

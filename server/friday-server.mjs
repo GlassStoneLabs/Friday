@@ -76,6 +76,19 @@ db.exec(`
     created INTEGER NOT NULL
   );
   CREATE INDEX IF NOT EXISTS mailbox_to ON mailbox(to_id);
+  -- a social identity (Google/Apple/…) bound to a Friday account. This is
+  -- IDENTITY ONLY: it proves who you are so we can find your account and org
+  -- across devices. Your mesh keys still live in a passphrase-encrypted vault
+  -- the server can never read — federated login does not change that.
+  CREATE TABLE IF NOT EXISTS federated (
+    provider TEXT NOT NULL, sub TEXT NOT NULL,
+    account_id TEXT NOT NULL, email TEXT, name TEXT, created INTEGER NOT NULL,
+    PRIMARY KEY (provider, sub)
+  );
+  CREATE TABLE IF NOT EXISTS oidc_state (
+    state TEXT PRIMARY KEY, provider TEXT NOT NULL, verifier TEXT NOT NULL,
+    nonce TEXT NOT NULL, redirect TEXT, created INTEGER NOT NULL
+  );
 `);
 
 const q = {
@@ -106,6 +119,15 @@ const q = {
   takeMail: db.prepare("SELECT * FROM mailbox WHERE to_id = ? ORDER BY id LIMIT 200"),
   dropMail: db.prepare("DELETE FROM mailbox WHERE id = ?"),
   sweepMail: db.prepare("DELETE FROM mailbox WHERE created < ?"),
+  federatedGet: db.prepare("SELECT * FROM federated WHERE provider = ? AND sub = ?"),
+  isFederated: db.prepare("SELECT 1 FROM federated WHERE account_id = ? LIMIT 1"),
+  federatedPut: db.prepare("INSERT OR IGNORE INTO federated (provider,sub,account_id,email,name,created) VALUES (?,?,?,?,?,?)"),
+  setKeys: db.prepare("UPDATE accounts SET box_pub = ?, sign_pub = ?, name = ? WHERE id = ?"),
+  setBox: db.prepare("UPDATE accounts SET box_pub = ?, name = ? WHERE id = ?"),
+  putState: db.prepare("INSERT INTO oidc_state (state,provider,verifier,nonce,redirect,created) VALUES (?,?,?,?,?,?)"),
+  getState: db.prepare("SELECT * FROM oidc_state WHERE state = ?"),
+  dropState: db.prepare("DELETE FROM oidc_state WHERE state = ?"),
+  sweepState: db.prepare("DELETE FROM oidc_state WHERE created < ?"),
 };
 
 const now = () => Date.now();
@@ -116,6 +138,84 @@ const inviteCode = () => {
   const pick = (n) => [...crypto.randomBytes(n)].map((b) => A[b % A.length]).join("");
   return `${pick(4)}-${pick(4)}-${pick(4)}`;
 };
+
+/* ============================================================
+   OIDC · "Sign in with Google / Apple / …" (identity only)
+   Real OpenID Connect Authorization Code + PKCE. The provider
+   proves who you are; we bind that identity to a Friday account.
+   Your mesh keys and vault stay passphrase-encrypted on the device —
+   this never gives the server the ability to read your data.
+
+   Configure providers in server/providers.json (git-ignored) or the
+   FRIDAY_OIDC env var. Each entry, keyed by id:
+     { "name": "Google",
+       "issuer": "https://accounts.google.com",   // discovery is automatic
+       "clientId": "...", "clientSecret": "...",
+       "scope": "openid email profile" }
+   Apple additionally needs a client_secret you generate as a signed JWT
+   (ES256) from your Apple key, and uses response_mode=form_post.
+
+   Nothing here is faked: with no config, no provider buttons appear.
+   ============================================================ */
+const b64url = (buf) => Buffer.from(buf).toString("base64url");
+function loadProviders() {
+  let cfg = {};
+  try {
+    const f = process.env.FRIDAY_OIDC_FILE || path.join(HERE, "providers.json");
+    if (fs.existsSync(f)) cfg = JSON.parse(fs.readFileSync(f, "utf8"));
+  } catch (e) { console.warn("providers.json unreadable:", e.message); }
+  if (process.env.FRIDAY_OIDC) { try { Object.assign(cfg, JSON.parse(process.env.FRIDAY_OIDC)); } catch {} }
+  return cfg;
+}
+let PROVIDERS = loadProviders();
+const PUBLIC_URL = process.env.FRIDAY_PUBLIC_URL || `http://localhost:${PORT}`;
+
+const _discoCache = new Map();   // issuer -> { doc, jwks, at }
+async function discover(p) {
+  if (p.authorization_endpoint && p.token_endpoint && p.jwks_uri) return p;   // explicit config
+  const c = _discoCache.get(p.issuer);
+  if (c && Date.now() - c.at < 3600e3) return c.doc;
+  const r = await fetch(p.issuer.replace(/\/$/, "") + "/.well-known/openid-configuration");
+  if (!r.ok) throw new Error("discovery failed for " + p.issuer);
+  const doc = { ...p, ...(await r.json()) };
+  _discoCache.set(p.issuer, { doc, at: Date.now() });
+  return doc;
+}
+async function jwks(doc) {
+  const c = _discoCache.get("jwks:" + doc.jwks_uri);
+  if (c && Date.now() - c.at < 3600e3) return c.keys;
+  const r = await fetch(doc.jwks_uri);
+  const { keys } = await r.json();
+  _discoCache.set("jwks:" + doc.jwks_uri, { keys, at: Date.now() });
+  return keys;
+}
+// verify an ID token's signature + core claims, return its payload
+async function verifyIdToken(doc, idToken, clientId, nonce) {
+  const [h, pl, sig] = idToken.split(".");
+  if (!h || !pl || !sig) throw new Error("malformed id_token");
+  const header = JSON.parse(Buffer.from(h, "base64url"));
+  const payload = JSON.parse(Buffer.from(pl, "base64url"));
+  const keys = await jwks(doc);
+  let jwk = keys.find((k) => k.kid === header.kid) || keys.find((k) => k.kty === (header.alg[0] === "R" ? "RSA" : "EC"));
+  if (!jwk) throw new Error("no matching signing key");
+  const key = crypto.createPublicKey({ key: jwk, format: "jwk" });
+  const data = Buffer.from(h + "." + pl);
+  const s = Buffer.from(sig, "base64url");
+  let ok;
+  if (header.alg === "RS256") ok = crypto.verify("RSA-SHA256", data, key, s);
+  else if (header.alg === "ES256") ok = crypto.verify("sha256", data, { key, dsaEncoding: "ieee-p1363" }, s);
+  else throw new Error("unsupported alg " + header.alg);
+  if (!ok) throw new Error("id_token signature invalid");
+  const iss = (doc.issuer || "").replace(/\/$/, "");
+  if ((payload.iss || "").replace(/\/$/, "") !== iss) throw new Error("issuer mismatch");
+  const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+  if (!aud.includes(clientId)) throw new Error("audience mismatch");
+  if (payload.exp && payload.exp * 1000 < Date.now() - 60000) throw new Error("id_token expired");
+  if (nonce && payload.nonce && payload.nonce !== nonce) throw new Error("nonce mismatch");
+  return payload;
+}
+const fedAccountId = (provider, sub) =>
+  "a-" + crypto.createHash("sha256").update(`oidc:${provider}:${sub}`).digest("hex").slice(0, 20);
 
 /* ---------------- signature verification (the whole auth story) ---------------- */
 function verifySig(signPubJwkStr, message, sigB64) {
@@ -188,7 +288,29 @@ function auth(req) {
   const a = q.accountById.get(s.account_id);
   return a ? { account: a, token } : null;
 }
-const pub = (a) => ({ id: a.id, name: a.name, boxPub: a.box_pub });
+const pub = (a) => ({ id: a.id, name: a.name, boxPub: a.box_pub, federated: !!q.isFederated.get(a.id) });
+
+// the little page the OIDC popup renders; it hands the session to the opener
+function oidcResultPage(result) {
+  const data = JSON.stringify(result).replace(/</g, "\\u003c");
+  return `<!doctype html><meta charset=utf-8><title>Friday — signing in…</title>
+<body style="margin:0;display:grid;place-items:center;height:100vh;font-family:-apple-system,sans-serif;background:#F4EFE6;color:#1B1B1C">
+<div style="text-align:center">
+  <div style="font-size:15px">${result.error ? "Sign-in failed" : "Signed in — returning to Friday…"}</div>
+  ${result.error ? `<div style="color:#6B1721;font-size:12px;margin-top:6px">${String(result.error).replace(/</g, "&lt;")}</div>` : ""}
+</div>
+<script id="friday-oidc-result" type="application/json">${data}</script>
+<script>
+  var r = ${data};
+  var sent = false;
+  // BroadcastChannel reaches the opener even when window.opener is null
+  // (headless, COOP, noopener). postMessage is a belt-and-braces second path.
+  try { var bc = new BroadcastChannel("friday-oidc"); bc.postMessage({ source: "friday-oidc", result: r }); sent = true; } catch (e) {}
+  try { if (window.opener) { window.opener.postMessage({ source: "friday-oidc", result: r }, "*"); sent = true; } } catch (e) {}
+  if (sent) { setTimeout(function(){ try { window.close(); } catch (e) {} }, 400); }
+  else { location.replace("/#oidc=" + encodeURIComponent(JSON.stringify(r))); }
+</script>`;
+}
 
 /* ---------------- API ---------------- */
 async function api(req, res, url) {
@@ -201,6 +323,86 @@ async function api(req, res, url) {
   // GET /api/health — lets the client discover whether a backend exists at all
   if (method === "GET" && route[0] === "health")
     return json(res, 200, { ok: true, service: "friday", version: "1.0.0", accounts: db.prepare("SELECT COUNT(*) n FROM accounts").get().n });
+
+  // GET /api/auth/providers → which social logins this server actually offers
+  if (method === "GET" && route[0] === "auth" && route[1] === "providers") {
+    const list = Object.entries(PROVIDERS)
+      .filter(([, p]) => p.clientId)
+      .map(([id, p]) => ({ id, name: p.name || id }));
+    return json(res, 200, { providers: list });
+  }
+
+  // GET /api/auth/:provider/start?redirect= → build the authorization URL (PKCE)
+  if (method === "GET" && route[0] === "auth" && route[2] === "start") {
+    const pid = route[1];
+    const p = PROVIDERS[pid];
+    if (!p || !p.clientId) return json(res, 404, { error: "provider not configured" });
+    let doc;
+    try { doc = await discover(p); } catch (e) { return json(res, 502, { error: "provider discovery failed" }); }
+    const state = rid(24), nonce = rid(24);
+    const verifier = b64url(crypto.randomBytes(48));
+    const challenge = b64url(crypto.createHash("sha256").update(verifier).digest());
+    q.sweepState.run(now() - 10 * 60000);
+    q.putState.run(state, pid, verifier, nonce, url.searchParams.get("redirect") || "", now());
+    const authUrl = new URL(doc.authorization_endpoint);
+    authUrl.searchParams.set("client_id", p.clientId);
+    authUrl.searchParams.set("redirect_uri", `${PUBLIC_URL}/api/auth/${pid}/callback`);
+    authUrl.searchParams.set("response_type", "code");
+    authUrl.searchParams.set("scope", p.scope || "openid email profile");
+    authUrl.searchParams.set("state", state);
+    authUrl.searchParams.set("nonce", nonce);
+    authUrl.searchParams.set("code_challenge", challenge);
+    authUrl.searchParams.set("code_challenge_method", "S256");
+    if (pid === "apple") authUrl.searchParams.set("response_mode", "form_post");
+    return json(res, 200, { authUrl: authUrl.toString() });
+  }
+
+  // GET/POST /api/auth/:provider/callback — provider redirects here with a code
+  if (route[0] === "auth" && route[2] === "callback") {
+    const pid = route[1];
+    const p = PROVIDERS[pid];
+    let code, state;
+    if (method === "POST") { const b = await readBody(req).catch(() => ({})); code = b.code; state = b.state; }
+    else { code = url.searchParams.get("code"); state = url.searchParams.get("state"); }
+    const fail = (msg) => {
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(oidcResultPage({ error: msg }));
+    };
+    if (!p || !p.clientId) return fail("provider not configured");
+    const st = q.getState.get(String(state || ""));
+    if (!st || st.provider !== pid || now() - st.created > 10 * 60000) return fail("expired or unknown login attempt");
+    q.dropState.run(st.state);
+    try {
+      const doc = await discover(p);
+      const form = new URLSearchParams({
+        grant_type: "authorization_code", code: String(code),
+        redirect_uri: `${PUBLIC_URL}/api/auth/${pid}/callback`,
+        client_id: p.clientId, code_verifier: st.verifier,
+      });
+      if (p.clientSecret) form.set("client_secret", p.clientSecret);
+      const tr = await fetch(doc.token_endpoint, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: form });
+      const tok = await tr.json();
+      if (!tr.ok || !tok.id_token) throw new Error(tok.error_description || tok.error || "token exchange failed");
+      const claims = await verifyIdToken(doc, tok.id_token, p.clientId, st.nonce);
+      const sub = claims.sub;
+      const name = claims.name || (claims.email ? claims.email.split("@")[0] : (p.name || pid) + " user");
+      const id = fedAccountId(pid, sub);
+      if (!q.accountById.get(id)) {
+        // an OIDC account starts with no keys; the browser binds them after it
+        // makes a vault. sign_pub stays a unique non-colliding provenance tag.
+        q.insertAccount.run(id, name, `oidc:${pid}:${sub}`, "", now());
+      }
+      q.federatedPut.run(pid, sub, id, claims.email || null, name, now());
+      const token = rid(32);
+      q.insertSession.run(token, id, now());
+      const acct = q.accountById.get(id);
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(oidcResultPage({ token, account: pub(acct), provider: pid, needsKeys: !acct.box_pub }));
+    } catch (e) {
+      return fail(String(e.message || e));
+    }
+    return;
+  }
 
   // POST /api/challenge {signPub} → {nonce}
   if (method === "POST" && route[0] === "challenge") {
@@ -265,6 +467,26 @@ async function api(req, res, url) {
   // GET /api/me → account + orgs
   if (method === "GET" && route[0] === "me")
     return json(res, 200, { account: pub(me.account), orgs: q.myOrgs.all(me.account.id) });
+
+  // POST /api/account/keys {boxPub, signPub?, name?} — the browser binds the
+  // vault it just made to this account. For a federated account this is how it
+  // gets a mesh public key (for E2E) and, optionally, a signing key so this
+  // device can re-authenticate later without repeating the OIDC dance.
+  if (method === "POST" && route[0] === "account" && route[1] === "keys") {
+    const b = await readBody(req);
+    if (!b.boxPub) return json(res, 400, { error: "boxPub required" });
+    const name = String(b.name || me.account.name).slice(0, 64);
+    const federated = me.account.sign_pub?.startsWith("oidc:");
+    if (b.signPub && federated) {
+      // don't let a second account claim a signing key already in use
+      const clash = q.accountBySign.get(String(b.signPub));
+      if (clash && clash.id !== me.account.id) return json(res, 409, { error: "key already bound" });
+      q.setKeys.run(String(b.boxPub), String(b.signPub), name, me.account.id);
+    } else {
+      q.setBox.run(String(b.boxPub), name, me.account.id);
+    }
+    return json(res, 200, { account: pub(q.accountById.get(me.account.id)) });
+  }
 
   // POST /api/orgs {name} → create an org, become its owner, get an invite
   if (method === "POST" && route[0] === "orgs" && route.length === 1) {
@@ -417,7 +639,7 @@ const server = http.createServer(async (req, res) => {
   serveStatic(req, res, url);
 });
 
-setInterval(() => { q.sweepChallenges.run(now() - 5 * 60000); q.sweepMail.run(now() - 30 * 864e5); }, 60000).unref();
+setInterval(() => { q.sweepChallenges.run(now() - 5 * 60000); q.sweepMail.run(now() - 30 * 864e5); q.sweepState.run(now() - 10 * 60000); }, 60000).unref();
 
 server.listen(PORT, () => {
   console.log(`\n  Friday · Eros Office — backend`);

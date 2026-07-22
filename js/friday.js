@@ -59,6 +59,16 @@ const Icons = {
   mic: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="9.4" y="3.4" width="5.2" height="10" rx="2.6"/><path d="M5.8 11.4a6.2 6.2 0 0 0 12.4 0M12 17.6v3"/></svg>`,
   home: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 10.4 12 4l7.5 6.4V19a1 1 0 0 1-1 1h-4.6v-5.2H10V20H5.5a1 1 0 0 1-1-1Z"/></svg>`,
   more: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="5.5" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="18.5" cy="12" r="1.4" fill="currentColor" stroke="none"/></svg>`,
+  // small monochrome marks for the social-login buttons
+  provider(id) {
+    const m = {
+      google: `<svg viewBox="0 0 18 18" width="16" height="16" aria-hidden="true"><path fill="#EA4335" d="M9 3.48c1.35 0 2.56.47 3.52 1.38l2.6-2.6C13.46.9 11.43 0 9 0 5.48 0 2.44 2.02.96 4.96l3.02 2.35C4.7 5.16 6.66 3.48 9 3.48z"/><path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72l2.92 2.26c1.71-1.57 2.68-3.89 2.68-6.62z"/><path fill="#FBBC05" d="M3.98 10.69A5.4 5.4 0 0 1 3.7 9c0-.59.1-1.16.28-1.69L.96 4.96A9 9 0 0 0 0 9c0 1.45.35 2.82.96 4.04l3.02-2.35z"/><path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.92-2.26c-.81.54-1.85.86-3.04.86-2.34 0-4.3-1.58-5.02-3.71L.96 13.04C2.44 15.98 5.48 18 9 18z"/></svg>`,
+      apple: `<svg viewBox="0 0 18 18" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M13.3 9.6c0-1.7 1.4-2.5 1.46-2.55-.8-1.17-2.04-1.33-2.48-1.35-1.05-.11-2.06.62-2.6.62-.53 0-1.36-.6-2.24-.59-1.15.02-2.21.67-2.8 1.7-1.2 2.08-.3 5.15.86 6.84.57.82 1.24 1.74 2.13 1.71.85-.03 1.18-.55 2.2-.55 1.03 0 1.32.55 2.22.53.92-.02 1.5-.83 2.06-1.66.65-.95.92-1.87.93-1.92-.02-.01-1.78-.68-1.8-2.7zM11.6 4.2c.47-.57.79-1.36.7-2.15-.68.03-1.5.45-1.98 1.02-.43.5-.81 1.3-.71 2.07.76.06 1.53-.38 2-.94z"/></svg>`,
+      github: `<svg viewBox="0 0 18 18" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M9 .3a9 9 0 0 0-2.85 17.54c.45.08.6-.2.6-.43v-1.5c-2.5.55-3.04-1.2-3.04-1.2-.4-1.05-1-1.33-1-1.33-.82-.56.06-.55.06-.55.9.06 1.38.93 1.38.93.8 1.38 2.1.98 2.62.75.08-.58.32-.98.57-1.2-2-.23-4.1-1-4.1-4.45 0-.98.35-1.79.93-2.42-.1-.23-.4-1.15.08-2.4 0 0 .76-.24 2.48.92a8.6 8.6 0 0 1 4.51 0c1.72-1.16 2.47-.92 2.47-.92.49 1.25.18 2.17.09 2.4.58.63.92 1.44.92 2.42 0 3.46-2.1 4.22-4.11 4.44.32.28.61.83.61 1.68v2.49c0 .24.16.52.61.43A9 9 0 0 0 9 .3z"/></svg>`,
+      microsoft: `<svg viewBox="0 0 18 18" width="15" height="15" aria-hidden="true"><path fill="#F25022" d="M1 1h7.6v7.6H1z"/><path fill="#7FBA00" d="M9.4 1H17v7.6H9.4z"/><path fill="#00A4EF" d="M1 9.4h7.6V17H1z"/><path fill="#FFB900" d="M9.4 9.4H17V17H9.4z"/></svg>`,
+    };
+    return m[id] || `<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><rect x="3.2" y="7" width="9.6" height="6.4" rx="1.8"/><path d="M5.4 7V5.2a2.6 2.6 0 0 1 5.2 0V7"/></svg>`;
+  },
 };
 
 /* ============================================================
@@ -779,6 +789,46 @@ const Server = {
     const me = await this.call("/me");
     this.orgs = me.orgs || [];
     return true;
+  },
+
+  /* ---- social login (OIDC): identity only, keys stay on the device ---- */
+  providersList: null,
+  async providers() {
+    if (this.providersList) return this.providersList;
+    try { this.providersList = (await this.call("/auth/providers")).providers || []; }
+    catch { this.providersList = []; }
+    return this.providersList;
+  },
+  // open the provider's page in a popup, resolve with the session it hands back.
+  // The popup MUST be opened synchronously inside the click gesture, else the
+  // browser blocks it — so we open it blank first, then point it at the auth URL.
+  oidcLogin(providerId) {
+    const pop = window.open("about:blank", "friday-oidc", "width=480,height=680");
+    return new Promise(async (resolve, reject) => {
+      if (!pop) return reject(new Error("Popup blocked — allow popups for Friday and try again."));
+      let bc; try { bc = new BroadcastChannel("friday-oidc"); } catch {}
+      const handle = (r) => {
+        if (!r || r.source !== "friday-oidc") return;
+        cleanup();
+        const res = r.result;
+        if (res.error) return reject(new Error(res.error));
+        this.token = res.token; this.account = res.account;
+        resolve(res);
+      };
+      const onMsg = (e) => handle(e.data);
+      const poll = setInterval(() => { if (pop.closed) { cleanup(); reject(new Error("cancelled")); } }, 600);
+      const cleanup = () => { clearInterval(poll); removeEventListener("message", onMsg); try { bc?.close(); } catch {} try { pop.close(); } catch {} };
+      addEventListener("message", onMsg);
+      if (bc) bc.onmessage = (e) => handle(e.data);
+      try {
+        const { authUrl } = await this.call(`/auth/${providerId}/start?redirect=${encodeURIComponent(location.origin)}`);
+        pop.location.href = authUrl;
+      } catch (e) { cleanup(); reject(e); }
+    });
+  },
+  // bind the vault's freshly-made public keys to the federated account
+  async bindKeys() {
+    return this.call("/account/keys", { boxPub: b64(Account.identity.pubRaw), signPub: Account.signPubString(), name: Account.name });
   },
 
   async createOrg(name) {
@@ -2898,6 +2948,19 @@ const Auth = {
     // no WebCrypto (insecure context) → can't encrypt; let the user in with a notice.
     // ?guest=1 starts an ephemeral session (fresh keys, nothing persisted) — also the e2e hook.
     if (!E2E.ok || new URLSearchParams(location.search).has("guest")) { onUnlock(); return; }
+    // returning from an OIDC full-page redirect (popup was blocked)
+    if (location.hash.startsWith("#oidc=")) {
+      try {
+        const r = JSON.parse(decodeURIComponent(location.hash.slice(6)));
+        history.replaceState(null, "", location.pathname + location.search);
+        if (!r.error && r.token) {
+          Server.token = r.token; Server.account = r.account;
+          try { Server.orgs = (await Server.call("/me")).orgs || []; } catch {}
+          const local = Account.logins().find((l) => l.federated?.accountId === r.account.id);
+          return local ? this.unlockPage(local, onUnlock) : this.federatedSetup({ id: r.provider, name: r.provider }, r, onUnlock);
+        }
+      } catch {}
+    }
     // an explicit "switch login" / "lock" lands on the picker, not straight back in
     let switching = false;
     try { switching = sessionStorage.getItem("friday.switch") === "1"; sessionStorage.removeItem("friday.switch"); } catch {}
@@ -2931,11 +2994,12 @@ const Auth = {
     for (const l of list) {
       const row = el("div", "login-row");
       row.setAttribute("role", "listitem");
+      const tag = l.federated ? `${esc((l.federated.providerName || l.federated.provider) || "").toUpperCase()} · ` : "";
       row.innerHTML = `
         <button class="login-pick" aria-label="Sign in as ${esc(l.name)}">
-          <span class="login-ini">${esc(this.initials(l.name))}</span>
+          <span class="login-ini">${l.federated ? Icons.provider(l.federated.provider) : esc(this.initials(l.name))}</span>
           <span class="login-meta"><span class="login-name">${esc(l.name)}</span>
-          <span class="login-sub mono">${l.remembered ? "REMEMBERED" : "LAST USED " + esc(this.ago(l.lastUsed)).toUpperCase()}</span></span>
+          <span class="login-sub mono">${tag}${l.remembered ? "REMEMBERED" : "LAST USED " + esc(this.ago(l.lastUsed)).toUpperCase()}</span></span>
         </button>
         <button class="login-forget" aria-label="Forget ${esc(l.name)}" title="Forget this login">×</button>`;
       row.querySelector(".login-pick").addEventListener("click", () => { veil.remove(); this.unlockPage(l, onUnlock); });
@@ -2950,6 +3014,7 @@ const Auth = {
     veil.querySelector("#a-add").addEventListener("click", () => { veil.remove(); this.createPage(onUnlock, true); });
     ll.querySelector(".login-pick")?.focus();
     if (pick) { const p = list.findIndex((l) => l.id === pick); if (p >= 0) ll.children[p].querySelector(".login-pick").click(); }
+    this.providerButtons(ll, onUnlock);
   },
 
   /* ---- unlock one login ---- */
@@ -3021,6 +3086,7 @@ const Auth = {
     veil.querySelector("#a-name").focus();
     veil.querySelector("#a-back")?.addEventListener("click", () => { veil.remove(); this.loginsPage(onUnlock); });
     veil.querySelector("#a-name").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); pass.focus(); } });
+    this.providerButtons(veil.querySelector(".lock-form"), onUnlock);
 
     veil.querySelector(".lock-form").addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -3045,11 +3111,14 @@ const Auth = {
   },
 
   /* ---- shared tail: greet the org server, then open the desktop ---- */
-  async afterUnlock(veil, onUnlock) {
+  async afterUnlock(veil, onUnlock, opts = {}) {
     const btn = veil?.querySelector(".lock-btn");
     if (btn) btn.textContent = "Connecting…";
     let needsOrg = false;
-    if (await Server.probe()) {
+    if (opts.session) {
+      // an OIDC session is already in hand; Server.orgs was loaded during the flow
+      needsOrg = !Server.orgs.length;
+    } else if (await Server.probe()) {
       try { await Server.authenticate(); needsOrg = !Server.orgs.length; }
       catch { /* server had a bad day — carry on peer-to-peer */ }
     }
@@ -3057,6 +3126,86 @@ const Auth = {
     if (!veil) return go();
     veil.classList.add("done");
     setTimeout(() => { veil.remove(); go(); }, 360);
+  },
+
+  /* ---- social login: OIDC proves identity, a passphrase still guards the vault ---- */
+  async providerButtons(form, onUnlock) {
+    if (!form.isConnected) return;           // page may have moved on during the probe
+    if (!await Server.probe()) return;
+    const provs = await Server.providers();
+    if (!provs.length || !form.isConnected) return;
+    const wrap = el("div", "oidc-wrap");
+    wrap.append(el("div", "oidc-divider mono", "OR CONTINUE WITH"));
+    for (const p of provs) {
+      const b = el("button", "oidc-btn", `${Icons.provider(p.id)}<span>${esc(p.name)}</span>`);
+      b.type = "button";
+      b.addEventListener("click", () => this.oidcFlow(p, onUnlock));
+      wrap.append(b);
+    }
+    form.after(wrap);
+  },
+
+  async oidcFlow(provider, onUnlock) {
+    const banner = document.querySelector(".lock-err");
+    if (banner) banner.textContent = "";
+    try {
+      const sess = await Server.oidcLogin(provider.id);       // popup → federated session
+      try { Server.orgs = (await Server.call("/me")).orgs || []; } catch {}
+      const local = Account.logins().find((l) => l.federated?.accountId === sess.account.id);
+      document.querySelector(".lock-veil")?.remove();
+      if (local) return this.unlockPage(local, onUnlock);      // vault is here — just unlock it
+      this.federatedSetup(provider, sess, onUnlock);           // first time on this device — set a device passphrase
+    } catch (e) {
+      if (String(e.message) === "cancelled") return;
+      if (banner) banner.textContent = String(e.message || e);
+    }
+  },
+
+  // first time a social identity is used on this device: make a local encrypted
+  // vault for the mesh keys, then bind those public keys to the federated account
+  federatedSetup(provider, sess, onUnlock) {
+    const veil = el("div", "lock-veil");
+    veil.innerHTML = `
+      <div class="lock-card glass">
+        <span class="login-ini big">${esc(this.initials(sess.account.name))}</span>
+        <div class="lock-title h-display" style="font-size:22px">${esc(sess.account.name)}<em>.</em></div>
+        <div class="lock-sub mono">SIGNED IN WITH ${esc(provider.name).toUpperCase()} · SECURE THIS DEVICE</div>
+        <div class="set-sub" style="text-align:center;margin:2px 0 8px">Your identity is verified. Set a passphrase to encrypt this device's keys — ${esc(provider.name)} and the server never see it, and it's what keeps your data end-to-end encrypted.</div>
+        <form class="lock-form" autocomplete="off">
+          <input class="lock-in" id="a-pass" type="password" placeholder="Choose a device passphrase" autocomplete="new-password">
+          <input class="lock-in" id="a-pass2" type="password" placeholder="Confirm passphrase" autocomplete="new-password">
+          <label class="lock-check"><input type="checkbox" id="a-remember"> <span>Keep me signed in on this device</span></label>
+          <div class="lock-err" id="a-err"></div>
+          <button class="lock-btn" type="submit">Secure &amp; continue</button>
+        </form>
+        <div class="lock-foot mono"><button class="lock-link" id="a-cancel">← Back</button></div>
+      </div>`;
+    document.body.append(veil);
+    const err = veil.querySelector("#a-err"), pass = veil.querySelector("#a-pass"), btn = veil.querySelector(".lock-btn");
+    pass.focus();
+    veil.querySelector("#a-cancel").addEventListener("click", () => { veil.remove(); this.gate(onUnlock); });
+
+    veil.querySelector(".lock-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.textContent = "";
+      const p1 = pass.value, p2 = veil.querySelector("#a-pass2").value;
+      if (p1.length < 8) { err.textContent = "Use at least 8 characters."; return; }
+      if (p1 !== p2) { err.textContent = "Passphrases do not match."; return; }
+      btn.textContent = "Sealing…"; btn.disabled = true;
+      try {
+        const id = await Account.signup(sess.account.name, p1);
+        Account.touch(id, { federated: { provider: provider.id, providerName: provider.name, accountId: sess.account.id } });
+        await Server.bindKeys();                    // the federated account now has this device's mesh key
+        if (veil.querySelector("#a-remember").checked) {
+          const kept = await Remember.put(id, Account._key);
+          Account.touch(id, { remembered: kept });
+        }
+        await this.afterUnlock(veil, onUnlock, { session: true });
+      } catch (ex) {
+        err.textContent = "Something went wrong. Try again.";
+        btn.disabled = false; btn.textContent = "Secure & continue";
+      }
+    });
   },
 
   /* create an org, or join one with an invite code */

@@ -2,3 +2,4 @@
 server/friday.db
 server/friday.db-shm
 server/friday.db-wal
+server/providers.json

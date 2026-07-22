@@ -665,6 +665,23 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .lock-check input { accent-color: var(--accent); width: 15px; height: 15px; }
 
+/* social login buttons */
+.oidc-wrap { width: 100%; display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.oidc-divider {
+  display: flex; align-items: center; gap: 10px; color: var(--muted);
+  font-size: 7.5px; letter-spacing: .16em; margin-bottom: 2px;
+}
+.oidc-divider::before, .oidc-divider::after { content: ""; flex: 1; height: 1px; background: var(--pane-edge); }
+.oidc-btn {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  width: 100%; min-height: 42px; border-radius: 12px; font-size: 13.5px; font-weight: 600;
+  background: var(--pane-bg); border: 1px solid var(--pane-edge);
+  transition: background var(--t-hover) var(--ease), transform var(--t-hover) var(--ease);
+}
+.oidc-btn:hover { background: color-mix(in srgb, var(--body) 6%, transparent); }
+.oidc-btn:active { transform: scale(0.99); }
+.oidc-btn svg { flex: 0 0 auto; }
+
 .org-tabs { display: flex; gap: 3px; padding: 3px; margin: 4px 0 12px; border-radius: 11px; background: color-mix(in srgb, var(--body) 7%, transparent); width: 100%; }
 .org-tabs .org-tab {
   flex: 1; padding: 7px 10px; border-radius: 9px; font-size: 12.5px; font-weight: 600;

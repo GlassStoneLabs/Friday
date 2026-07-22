@@ -1,0 +1,36 @@
+{
+  "__comment": "Copy this to providers.json (git-ignored) and fill in real values. Only providers with a clientId are advertised to the app. Discovery is automatic from `issuer`; you can override authorization_endpoint / token_endpoint / jwks_uri if a provider lacks a discovery document.",
+
+  "google": {
+    "name": "Google",
+    "issuer": "https://accounts.google.com",
+    "clientId": "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com",
+    "clientSecret": "YOUR_GOOGLE_CLIENT_SECRET",
+    "scope": "openid email profile"
+  },
+
+  "github": {
+    "name": "GitHub",
+    "note": "GitHub OAuth is not OIDC — use a provider that issues OIDC id_tokens, or front GitHub with an OIDC bridge. Left here as a placeholder.",
+    "issuer": "https://token.actions.githubusercontent.com",
+    "clientId": "",
+    "scope": "openid"
+  },
+
+  "apple": {
+    "name": "Apple",
+    "issuer": "https://appleid.apple.com",
+    "clientId": "com.yourteam.friday",
+    "clientSecret": "APPLE_CLIENT_SECRET_JWT_ES256_SIGNED_FROM_YOUR_KEY",
+    "scope": "openid email name",
+    "note": "Apple's clientSecret is a short-lived ES256 JWT you generate from your Apple key; Apple uses response_mode=form_post."
+  },
+
+  "microsoft": {
+    "name": "Microsoft",
+    "issuer": "https://login.microsoftonline.com/common/v2.0",
+    "clientId": "YOUR_AZURE_APP_CLIENT_ID",
+    "clientSecret": "YOUR_AZURE_CLIENT_SECRET",
+    "scope": "openid email profile"
+  }
+}
