@@ -27,6 +27,13 @@ surfaces, to running the backend and building the native apps.
 | 15 | [Deployment & Operations](15-deployment.md) | Serving, HTTPS, providers, ports, the database |
 | 16 | [Reference & Glossary](16-reference.md) | API table, config, shortcuts, repo map, glossary |
 
+## Also see
+
+- **[TECHNICAL.md](../TECHNICAL.md)** — the engineering specification: protocols,
+  wire formats, sequence/state/ER diagrams, cryptographic constructions, and a
+  STRIDE threat model. This manual is the "how to use it"; that is the "how it
+  works, exactly."
+
 ## Conventions
 
 - Code paths are given relative to the repository root — e.g. `js/friday.js`,

@@ -83,9 +83,11 @@ the mesh keeps working.
 
 ## Documentation
 
-Full manual in [`docs/`](docs/README.md) — 16 pages covering the security model,
-accounts, encryption, the mesh, off-grid relay, the backend API, the surfaces,
-the native apps, the design language, storage, and deployment.
+- **Manual** — [`docs/`](docs/README.md): 16 pages covering the security model,
+  accounts, encryption, the mesh, off-grid relay, the backend API, the surfaces,
+  the native apps, the design language, storage, and deployment.
+- **Technical specification** — [`TECHNICAL.md`](TECHNICAL.md): protocols, wire
+  formats, sequence diagrams, cryptographic parameters, and threat model.
 
 ## Install — pick whichever is easiest
 
