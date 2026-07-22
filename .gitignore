@@ -6,3 +6,4 @@ server/providers.json
 mac/build/
 mac/main
 mac/*.o
+ios/build/

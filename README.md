@@ -25,6 +25,19 @@ It's a small **Swift + WKWebView** shell (system WebKit — no Electron, no npm)
 that serves the bundled web app over a loopback secure-context origin, so the
 encryption and mesh all work natively. Details in [`mac/README.md`](mac/README.md).
 
+## Native iOS & iPad app
+
+Same Swift + WKWebView approach for iPhone and iPad. Run it in the Simulator:
+
+```sh
+cd ios
+./run-sim.sh "iPhone 16"
+./run-sim.sh "iPad Pro 11-inch (M4)"
+```
+
+One app, two layouts — the pocket-pane UI on iPhone, the wider two-pane layout on
+iPad. Details (and how to build for a real device) in [`ios/README.md`](ios/README.md).
+
 ## The backend (optional)
 
 Friday works with **no server at all** — the mesh is peer-to-peer. A server adds

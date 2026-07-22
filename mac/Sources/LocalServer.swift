@@ -24,8 +24,8 @@ final class LocalServer {
     /// localStorage / IndexedDB) stays stable across launches; falls back to an
     /// OS-assigned port only if that one is genuinely unavailable.
     func start(preferred: UInt16) throws {
-        if (try? bind(on: preferred)) != nil { return }
-        try bind(on: 0)   // ephemeral fallback
+        if let ok = try? bind(on: preferred), ok { return }
+        try bind(on: 0)   // preferred port taken/failed → ephemeral fallback
     }
 
     @discardableResult
