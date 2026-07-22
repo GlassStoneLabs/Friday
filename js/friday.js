@@ -2944,6 +2944,107 @@ const Auth = {
     return new Date(t).toLocaleDateString([], { month: "short", day: "numeric" });
   },
 
+  // the animated mark used on the brand panel — an F constellation sealed in a
+  // slowly-orbiting encryption ring
+  MARK: `<svg viewBox="0 0 120 120" class="auth-mark" aria-hidden="true">
+    <defs>
+      <linearGradient id="am-tile" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#1E2029"/><stop offset="1" stop-color="#1A3A5C"/>
+      </linearGradient>
+      <radialGradient id="am-glow" cx="0.5" cy="0.5" r="0.5">
+        <stop offset="0" stop-color="#B3273B" stop-opacity="0.5"/><stop offset="1" stop-color="#B3273B" stop-opacity="0"/>
+      </radialGradient>
+    </defs>
+    <rect x="14" y="14" width="92" height="92" rx="26" fill="url(#am-tile)"/>
+    <rect x="14" y="14" width="92" height="92" rx="26" fill="url(#am-glow)" class="am-pulse"/>
+    <circle cx="60" cy="60" r="52" fill="none" stroke="#F0E8D8" stroke-opacity="0.22" stroke-width="1" stroke-dasharray="3 7" class="am-ring"/>
+    <g stroke="#F0E8D8" stroke-opacity="0.85" stroke-width="3" stroke-linecap="round">
+      <line x1="45" y1="38" x2="45" y2="82"/><line x1="45" y1="38" x2="78" y2="38"/><line x1="45" y1="60" x2="70" y2="60"/>
+    </g>
+    <g fill="#B3273B">
+      <circle cx="45" cy="38" r="6"/><circle cx="78" cy="38" r="6"/><circle cx="45" cy="60" r="6.4"/><circle cx="70" cy="60" r="5.2"/><circle cx="45" cy="82" r="6"/>
+    </g>
+    <g fill="#F4EFE6">
+      <circle cx="45" cy="38" r="2.4"/><circle cx="78" cy="38" r="2.4"/><circle cx="45" cy="60" r="2.6"/><circle cx="70" cy="60" r="2.1"/><circle cx="45" cy="82" r="2.4"/>
+    </g>
+  </svg>`,
+
+  // wrap mode-specific panel content in the two-pane brand + form shell
+  wrap(panelHTML) {
+    const veil = el("div", "lock-veil");
+    veil.innerHTML = `
+      <canvas class="lock-mesh" aria-hidden="true"></canvas>
+      <div class="lock-shell glass">
+        <aside class="lock-brand">
+          <div class="brand-top">${this.MARK}
+            <div><div class="brand-word h-display">Friday</div><div class="brand-word-sub mono">EROS OFFICE</div></div>
+          </div>
+          <div class="brand-tag">A workspace that needs no server to be one — messages, boards, calls and storage, sealed end-to-end and carried device to device.</div>
+          <ul class="brand-points mono">
+            <li>END-TO-END · X25519 · AES-256-GCM</li>
+            <li>YOUR KEYS NEVER LEAVE THIS DEVICE</li>
+            <li>NO PASSWORD STORED, ANYWHERE</li>
+          </ul>
+          <div class="brand-foot mono">GLASS STONE LLC · ORANGE PIE V1 ALPHA</div>
+        </aside>
+        <section class="lock-panel">${panelHTML}</section>
+      </div>`;
+    document.body.append(veil);
+    this.startMesh(veil.querySelector(".lock-mesh"));
+    return veil;
+  },
+
+  // calm drifting constellation behind the card; self-stops when the veil is gone
+  startMesh(canvas) {
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const N = 30;
+    const nodes = Array.from({ length: N }, () => ({ x: Math.random(), y: Math.random(), vx: (Math.random() - 0.5) * 0.0005, vy: (Math.random() - 0.5) * 0.0005 }));
+    const cs = getComputedStyle(document.documentElement);
+    const accent = cs.getPropertyValue("--accent").trim() || "#6B1721";
+    const body = cs.getPropertyValue("--body").trim() || "#1B1B1C";
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const draw = () => {
+      if (!canvas.isConnected) return;
+      const dpr = devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+      if (!w || !h) { requestAnimationFrame(draw); return; }
+      if (canvas.width !== w * dpr || canvas.height !== h * dpr) { canvas.width = w * dpr; canvas.height = h * dpr; }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      if (!reduce) for (const n of nodes) { n.x += n.vx; n.y += n.vy; if (n.x < 0 || n.x > 1) n.vx *= -1; if (n.y < 0 || n.y > 1) n.vy *= -1; }
+      const pts = nodes.map((n) => ({ x: n.x * w, y: n.y * h }));
+      const max = Math.min(w, h) * 0.26;
+      for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
+        const d = Math.hypot(pts[i].x - pts[j].x, pts[i].y - pts[j].y);
+        if (d < max) { ctx.strokeStyle = body; ctx.globalAlpha = 0.05 * (1 - d / max); ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(pts[i].x, pts[i].y); ctx.lineTo(pts[j].x, pts[j].y); ctx.stroke(); }
+      }
+      ctx.globalAlpha = 0.22; ctx.fillStyle = accent;
+      for (const p of pts) { ctx.beginPath(); ctx.arc(p.x, p.y, 1.4, 0, 7); ctx.fill(); }
+      ctx.globalAlpha = 1;
+      if (!reduce) requestAnimationFrame(draw);
+    };
+    requestAnimationFrame(draw);
+  },
+
+  // a small "sealing" strip under a passphrase field — reflects LENGTH ONLY
+  // (never the value), so it evokes ciphertext without leaking anything
+  cipherStrip(input) {
+    const strip = el("div", "cipher-strip mono");
+    strip.setAttribute("aria-hidden", "true");
+    input.after(strip);
+    const A = "0123456789ABCDEF";
+    const render = () => {
+      const n = Math.min(input.value.length, 40);
+      if (!n) { strip.textContent = ""; strip.classList.remove("on"); return; }
+      strip.classList.add("on");
+      let s = "";
+      for (let i = 0; i < n; i++) s += A[(Math.random() * 16) | 0];
+      strip.textContent = "⌁ " + s;
+    };
+    input.addEventListener("input", render);
+    return strip;
+  },
+
   async gate(onUnlock) {
     // no WebCrypto (insecure context) → can't encrypt; let the user in with a notice.
     // ?guest=1 starts an ephemeral session (fresh keys, nothing persisted) — also the e2e hook.
@@ -2979,16 +3080,11 @@ const Auth = {
   /* ---- the logins page: everyone this device remembers ---- */
   loginsPage(onUnlock, pick) {
     const list = Account.logins();
-    const veil = el("div", "lock-veil");
-    veil.innerHTML = `
-      <div class="lock-card glass" style="width:400px">
-        <img src="assets/logo.svg" alt="" width="60" height="60">
-        <div class="lock-title h-display">Sign in<em>.</em></div>
-        <div class="lock-sub mono">EROS OFFICE · ${list.length} LOGIN${list.length === 1 ? "" : "S"} ON THIS DEVICE</div>
-        <div class="login-list" id="ll" role="list"></div>
-        <div class="lock-foot mono"><button class="lock-link" id="a-add">+ Create another login</button></div>
-      </div>`;
-    document.body.append(veil);
+    const veil = this.wrap(`
+      <div class="lock-title h-display">Welcome back<em>.</em></div>
+      <div class="lock-sub mono">${list.length} LOGIN${list.length === 1 ? "" : "S"} ON THIS DEVICE</div>
+      <div class="login-list" id="ll" role="list"></div>
+      <div class="lock-foot mono"><button class="lock-link" id="a-add">+ Create another login</button></div>`);
     const ll = veil.querySelector("#ll");
 
     for (const l of list) {
@@ -3019,22 +3115,20 @@ const Auth = {
 
   /* ---- unlock one login ---- */
   unlockPage(login, onUnlock) {
-    const veil = el("div", "lock-veil");
-    veil.innerHTML = `
-      <div class="lock-card glass">
-        <span class="login-ini big">${esc(this.initials(login.name))}</span>
-        <div class="lock-title h-display" style="font-size:23px">${esc(login.name)}<em>.</em></div>
-        <div class="lock-sub mono">EROS OFFICE · ENCRYPTED VAULT</div>
-        <form class="lock-form" autocomplete="off">
-          <input class="lock-in" id="a-pass" type="password" placeholder="Passphrase" autocomplete="current-password">
-          <label class="lock-check"><input type="checkbox" id="a-remember"> <span>Keep me signed in on this device</span></label>
-          <div class="lock-err" id="a-err"></div>
-          <button class="lock-btn" type="submit">Unlock</button>
-        </form>
-        <div class="lock-foot mono"><button class="lock-link" id="a-back">← All logins</button></div>
-      </div>`;
-    document.body.append(veil);
+    const av = login.federated ? Icons.provider(login.federated.provider) : esc(this.initials(login.name));
+    const veil = this.wrap(`
+      <span class="login-ini big">${av}</span>
+      <div class="lock-title h-display" style="font-size:24px">${esc(login.name)}<em>.</em></div>
+      <div class="lock-sub mono">${login.federated ? esc((login.federated.providerName || login.federated.provider)).toUpperCase() + " · " : ""}ENCRYPTED VAULT</div>
+      <form class="lock-form" autocomplete="off">
+        <input class="lock-in" id="a-pass" type="password" placeholder="Passphrase" autocomplete="current-password">
+        <label class="lock-check"><input type="checkbox" id="a-remember"> <span>Keep me signed in on this device</span></label>
+        <div class="lock-err" id="a-err"></div>
+        <button class="lock-btn" type="submit">Unlock</button>
+      </form>
+      <div class="lock-foot mono"><button class="lock-link" id="a-back">← All logins</button></div>`);
     const err = veil.querySelector("#a-err"), pass = veil.querySelector("#a-pass"), btn = veil.querySelector(".lock-btn");
+    this.cipherStrip(pass);
     pass.focus();
     veil.querySelector("#a-back").addEventListener("click", () => { veil.remove(); this.loginsPage(onUnlock); });
 
@@ -3063,26 +3157,22 @@ const Auth = {
 
   /* ---- create a new login ---- */
   createPage(onUnlock, hasOthers) {
-    const veil = el("div", "lock-veil");
-    veil.innerHTML = `
-      <div class="lock-card glass">
-        <img src="assets/logo.svg" alt="" width="68" height="68">
-        <div class="lock-title h-display">Create a login<em>.</em></div>
-        <div class="lock-sub mono">EROS OFFICE · END-TO-END ENCRYPTED PAGES</div>
-        <form class="lock-form" autocomplete="off">
-          <input class="lock-in" id="a-name" type="text" placeholder="Display name" autocomplete="off">
-          <input class="lock-in" id="a-pass" type="password" placeholder="Choose a passphrase" autocomplete="new-password">
-          <input class="lock-in" id="a-pass2" type="password" placeholder="Confirm passphrase" autocomplete="new-password">
-          <label class="lock-check"><input type="checkbox" id="a-remember"> <span>Keep me signed in on this device</span></label>
-          <div class="lock-err" id="a-err"></div>
-          <button class="lock-btn" type="submit">Create login</button>
-        </form>
-        <div class="lock-foot mono">${hasOthers
-          ? `<button class="lock-link" id="a-back">← All logins</button>`
-          : `KEYS NEVER LEAVE THIS DEVICE · PBKDF2 · AES-256-GCM`}</div>
-      </div>`;
-    document.body.append(veil);
+    const veil = this.wrap(`
+      <div class="lock-title h-display">Create your account<em>.</em></div>
+      <div class="lock-sub mono">END-TO-END ENCRYPTED · NOTHING LEAVES THIS DEVICE</div>
+      <form class="lock-form" autocomplete="off">
+        <input class="lock-in" id="a-name" type="text" placeholder="Display name" autocomplete="off">
+        <input class="lock-in" id="a-pass" type="password" placeholder="Choose a passphrase" autocomplete="new-password">
+        <input class="lock-in" id="a-pass2" type="password" placeholder="Confirm passphrase" autocomplete="new-password">
+        <label class="lock-check"><input type="checkbox" id="a-remember"> <span>Keep me signed in on this device</span></label>
+        <div class="lock-err" id="a-err"></div>
+        <button class="lock-btn" type="submit">Create account</button>
+      </form>
+      <div class="lock-foot mono">${hasOthers
+        ? `<button class="lock-link" id="a-back">← All logins</button>`
+        : `PBKDF2 · AES-256-GCM · KEYS SEALED ON THIS DEVICE`}</div>`);
     const err = veil.querySelector("#a-err"), pass = veil.querySelector("#a-pass"), btn = veil.querySelector(".lock-btn");
+    this.cipherStrip(pass);
     veil.querySelector("#a-name").focus();
     veil.querySelector("#a-back")?.addEventListener("click", () => { veil.remove(); this.loginsPage(onUnlock); });
     veil.querySelector("#a-name").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); pass.focus(); } });
@@ -3164,24 +3254,21 @@ const Auth = {
   // first time a social identity is used on this device: make a local encrypted
   // vault for the mesh keys, then bind those public keys to the federated account
   federatedSetup(provider, sess, onUnlock) {
-    const veil = el("div", "lock-veil");
-    veil.innerHTML = `
-      <div class="lock-card glass">
-        <span class="login-ini big">${esc(this.initials(sess.account.name))}</span>
-        <div class="lock-title h-display" style="font-size:22px">${esc(sess.account.name)}<em>.</em></div>
-        <div class="lock-sub mono">SIGNED IN WITH ${esc(provider.name).toUpperCase()} · SECURE THIS DEVICE</div>
-        <div class="set-sub" style="text-align:center;margin:2px 0 8px">Your identity is verified. Set a passphrase to encrypt this device's keys — ${esc(provider.name)} and the server never see it, and it's what keeps your data end-to-end encrypted.</div>
-        <form class="lock-form" autocomplete="off">
-          <input class="lock-in" id="a-pass" type="password" placeholder="Choose a device passphrase" autocomplete="new-password">
-          <input class="lock-in" id="a-pass2" type="password" placeholder="Confirm passphrase" autocomplete="new-password">
-          <label class="lock-check"><input type="checkbox" id="a-remember"> <span>Keep me signed in on this device</span></label>
-          <div class="lock-err" id="a-err"></div>
-          <button class="lock-btn" type="submit">Secure &amp; continue</button>
-        </form>
-        <div class="lock-foot mono"><button class="lock-link" id="a-cancel">← Back</button></div>
-      </div>`;
-    document.body.append(veil);
+    const veil = this.wrap(`
+      <span class="login-ini big">${Icons.provider(provider.id)}</span>
+      <div class="lock-title h-display" style="font-size:23px">${esc(sess.account.name)}<em>.</em></div>
+      <div class="lock-sub mono">SIGNED IN WITH ${esc(provider.name).toUpperCase()} · SECURE THIS DEVICE</div>
+      <div class="set-sub" style="margin:2px 0 8px">Your identity is verified. Set a passphrase to encrypt this device's keys — ${esc(provider.name)} and the server never see it, and it's what keeps your data end-to-end encrypted.</div>
+      <form class="lock-form" autocomplete="off">
+        <input class="lock-in" id="a-pass" type="password" placeholder="Choose a device passphrase" autocomplete="new-password">
+        <input class="lock-in" id="a-pass2" type="password" placeholder="Confirm passphrase" autocomplete="new-password">
+        <label class="lock-check"><input type="checkbox" id="a-remember"> <span>Keep me signed in on this device</span></label>
+        <div class="lock-err" id="a-err"></div>
+        <button class="lock-btn" type="submit">Secure &amp; continue</button>
+      </form>
+      <div class="lock-foot mono"><button class="lock-link" id="a-cancel">← Back</button></div>`);
     const err = veil.querySelector("#a-err"), pass = veil.querySelector("#a-pass"), btn = veil.querySelector(".lock-btn");
+    this.cipherStrip(pass);
     pass.focus();
     veil.querySelector("#a-cancel").addEventListener("click", () => { veil.remove(); this.gate(onUnlock); });
 
@@ -3210,24 +3297,19 @@ const Auth = {
 
   /* create an org, or join one with an invite code */
   orgStep(done) {
-    const veil = el("div", "lock-veil");
-    veil.innerHTML = `
-      <div class="lock-card glass" style="width:420px">
-        <img src="assets/logo.svg" alt="" width="60" height="60">
-        <div class="lock-title h-display">Your organization<em>.</em></div>
-        <div class="lock-sub mono">EROS OFFICE · ${esc(Account.name || "")}</div>
-        <div class="org-tabs" role="tablist">
-          <button class="org-tab on" id="t-join" role="tab" aria-selected="true">Join an org</button>
-          <button class="org-tab" id="t-make" role="tab" aria-selected="false">Create one</button>
-        </div>
-        <form class="lock-form" autocomplete="off">
-          <div id="org-pane"></div>
-          <div class="lock-err" id="o-err"></div>
-          <button class="lock-btn" type="submit" id="o-go">Join</button>
-        </form>
-        <div class="lock-foot mono"><button class="lock-link" id="o-skip">Skip — use Friday on this device only</button></div>
-      </div>`;
-    document.body.append(veil);
+    const veil = this.wrap(`
+      <div class="lock-title h-display">Your organization<em>.</em></div>
+      <div class="lock-sub mono">SIGNED IN AS ${esc(Account.name || "")}</div>
+      <div class="org-tabs" role="tablist">
+        <button class="org-tab on" id="t-join" role="tab" aria-selected="true">Join an org</button>
+        <button class="org-tab" id="t-make" role="tab" aria-selected="false">Create one</button>
+      </div>
+      <form class="lock-form" autocomplete="off">
+        <div id="org-pane"></div>
+        <div class="lock-err" id="o-err"></div>
+        <button class="lock-btn" type="submit" id="o-go">Join</button>
+      </form>
+      <div class="lock-foot mono"><button class="lock-link" id="o-skip">Skip — use Friday on this device only</button></div>`);
     const pane = veil.querySelector("#org-pane");
     const err = veil.querySelector("#o-err");
     const go = veil.querySelector("#o-go");
